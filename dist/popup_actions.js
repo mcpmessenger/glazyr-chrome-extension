@@ -1,10 +1,29 @@
 (() => {
+  function ensureRegionSelectContentScript(tabId, cb) {
+    // If the content script listener isn't present (common after updates),
+    // inject the file and retry.
+    if (!chrome?.scripting?.executeScript) return cb?.()
+    chrome.scripting.executeScript(
+      { target: { tabId }, files: ["region_select_content.js"] },
+      () => cb?.()
+    )
+  }
+
   function startFramedScreenshot() {
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       const tabId = tabs?.[0]?.id
       if (!tabId) return
       setStatus("Select an area on the page: drag to frame, Enter to capture, Esc to cancel.")
-      chrome.tabs.sendMessage(tabId, { type: "BEGIN_REGION_SELECT" })
+      chrome.tabs.sendMessage(tabId, { type: "BEGIN_REGION_SELECT" }, () => {
+        const err = chrome.runtime.lastError
+        if (!err) return
+        // Retry after injecting the selection script
+        ensureRegionSelectContentScript(tabId, () => {
+          chrome.tabs.sendMessage(tabId, { type: "BEGIN_REGION_SELECT" }, () => {
+            void chrome.runtime.lastError
+          })
+        })
+      })
     })
   }
 

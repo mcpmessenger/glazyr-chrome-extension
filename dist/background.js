@@ -56,7 +56,20 @@
 
   function requestRegionSelect(tabId) {
     chrome.tabs.sendMessage(tabId, { type: "BEGIN_REGION_SELECT" }, () => {
-      void chrome.runtime.lastError
+      const err = chrome.runtime.lastError
+      if (!err) return
+      // If the content script isn't present (e.g. tab opened before extension update),
+      // inject the region selection script and retry.
+      if (chrome?.scripting?.executeScript) {
+        chrome.scripting.executeScript(
+          { target: { tabId }, files: ["region_select_content.js"] },
+          () => {
+            chrome.tabs.sendMessage(tabId, { type: "BEGIN_REGION_SELECT" }, () => {
+              void chrome.runtime.lastError
+            })
+          }
+        )
+      }
     })
     safeRuntimeSendMessage({
       type: "CAPTURE_HINT",
