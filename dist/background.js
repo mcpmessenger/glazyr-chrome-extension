@@ -15,6 +15,49 @@
     }
   }
 
+  const OPENAI_KEY_STORAGE = "openaiApiKey"
+
+  async function getOpenAIKey() {
+    return await new Promise((resolve) => {
+      chrome.storage.local.get([OPENAI_KEY_STORAGE], (res) => resolve(res?.[OPENAI_KEY_STORAGE] || ""))
+    })
+  }
+
+  function guessAudioFileName(mimeType) {
+    if (!mimeType) return "audio.webm"
+    const mt = mimeType.toLowerCase()
+    if (mt.includes("ogg")) return "audio.ogg"
+    if (mt.includes("wav")) return "audio.wav"
+    if (mt.includes("mpeg") || mt.includes("mp3")) return "audio.mp3"
+    if (mt.includes("mp4") || mt.includes("m4a")) return "audio.m4a"
+    return "audio.webm"
+  }
+
+  async function transcribeWhisper({ audio, mimeType }) {
+    const apiKey = await getOpenAIKey()
+    if (!apiKey) throw new Error("OpenAI API key not set. Click the mic and enter your key.")
+    if (!audio) throw new Error("No audio provided.")
+
+    const blob = new Blob([audio], { type: mimeType || "audio/webm" })
+    const form = new FormData()
+    form.append("model", "whisper-1")
+    form.append("file", blob, guessAudioFileName(mimeType))
+
+    const resp = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: form,
+    })
+
+    const text = await resp.text()
+    if (!resp.ok) throw new Error(`Whisper STT failed (${resp.status}): ${text}`)
+
+    const json = JSON.parse(text)
+    return String(json?.text || "")
+  }
+
   async function dataUrlToBlob(dataUrl) {
     const res = await fetch(dataUrl)
     return await res.blob()
@@ -171,6 +214,14 @@
       chrome.storage.local.get(["lastCapture"], (res) => {
         sendResponse({ lastCapture: res?.lastCapture || null })
       })
+      return true
+    }
+
+    if (msg?.type === "STT_TRANSCRIBE") {
+      transcribeWhisper({ audio: msg.audio, mimeType: msg.mimeType }).then(
+        (text) => sendResponse({ ok: true, text }),
+        (err) => sendResponse({ ok: false, error: String(err?.message || err) })
+      )
       return true
     }
 

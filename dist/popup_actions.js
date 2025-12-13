@@ -92,12 +92,166 @@
     })
   }
 
+  // --- Whisper STT (mic button injected next to the React input) ---
+  const OPENAI_KEY_STORAGE = "openaiApiKey"
+
+  function getInputAndForm() {
+    const root = document.getElementById("root")
+    if (!root) return { form: null, input: null, sendBtn: null }
+
+    const input = root.querySelector('input[placeholder="Ask Glazyr a question..."]')
+    const form = input ? input.closest("form") : null
+    const sendBtn = form ? form.querySelector('button[type="submit"]') : null
+    return { form, input, sendBtn }
+  }
+
+  function setReactInputValue(input, value) {
+    input.value = value
+    input.dispatchEvent(new Event("input", { bubbles: true }))
+  }
+
+  function getOpenAIKey(cb) {
+    chrome.storage.local.get([OPENAI_KEY_STORAGE], (res) => cb(res?.[OPENAI_KEY_STORAGE] || ""))
+  }
+
+  function setOpenAIKey(key, cb) {
+    chrome.storage.local.set({ [OPENAI_KEY_STORAGE]: key }, () => cb?.())
+  }
+
+  function ensureKeyThen(cb) {
+    getOpenAIKey((key) => {
+      if (key) return cb(key)
+      const entered = prompt("Enter your OpenAI API key for Whisper STT (stored locally):")
+      if (!entered) {
+        setStatus("STT key not set.")
+        return
+      }
+      setOpenAIKey(entered.trim(), () => cb(entered.trim()))
+    })
+  }
+
+  async function blobToArrayBuffer(blob) {
+    return await blob.arrayBuffer()
+  }
+
+  function installMicButton() {
+    const { form, input, sendBtn } = getInputAndForm()
+    if (!form || !input || !sendBtn) return false
+    if (form.querySelector(".glazyr-mic-btn")) return true
+
+    const btn = document.createElement("button")
+    btn.type = "button"
+    btn.className = "glazyr-mic-btn"
+    btn.title = "Voice input (Whisper STT)"
+    btn.textContent = "🎙"
+
+    // Insert between input and Send button (works with the existing flex layout)
+    sendBtn.insertAdjacentElement("beforebegin", btn)
+
+    let mediaRecorder = null
+    let chunks = []
+    let stream = null
+    let recording = false
+
+    async function start() {
+      ensureKeyThen(async () => {
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+          const mimeType =
+            MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? "audio/webm;codecs=opus" : "audio/webm"
+          mediaRecorder = new MediaRecorder(stream, { mimeType })
+          chunks = []
+
+          mediaRecorder.ondataavailable = (e) => {
+            if (e.data && e.data.size > 0) chunks.push(e.data)
+          }
+          mediaRecorder.onstop = async () => {
+            try {
+              const blob = new Blob(chunks, { type: mimeType })
+              setStatus("Transcribing…")
+              const audio = await blobToArrayBuffer(blob)
+
+              chrome.runtime.sendMessage(
+                { type: "STT_TRANSCRIBE", mimeType: blob.type || mimeType, audio },
+                (res) => {
+                  if (chrome.runtime.lastError) {
+                    setStatus("STT error.")
+                    setResult(chrome.runtime.lastError.message)
+                    return
+                  }
+                  if (!res?.ok) {
+                    setStatus("STT error.")
+                    setResult(res?.error || "Unknown STT error")
+                    return
+                  }
+
+                  const text = String(res.text || "").trim()
+                  if (!text) {
+                    setStatus("No speech detected.")
+                    return
+                  }
+
+                  setStatus("STT inserted. Edit if needed, then Send.")
+                  setReactInputValue(input, text)
+                  input.focus()
+                }
+              )
+            } finally {
+              // cleanup stream
+              try {
+                stream?.getTracks?.().forEach((t) => t.stop())
+              } catch {}
+              stream = null
+              mediaRecorder = null
+              chunks = []
+              recording = false
+              btn.classList.remove("recording")
+              btn.textContent = "🎙"
+            }
+          }
+
+          recording = true
+          btn.classList.add("recording")
+          btn.textContent = "⏹"
+          setStatus("Recording… click again to stop.")
+          mediaRecorder.start()
+        } catch (e) {
+          setStatus("Mic permission denied or unavailable.")
+          setResult(String(e?.message || e))
+        }
+      })
+    }
+
+    function stop() {
+      try {
+        mediaRecorder?.stop()
+      } catch (e) {
+        setStatus("STT error.")
+        setResult(String(e?.message || e))
+      }
+    }
+
+    btn.addEventListener("click", () => {
+      if (recording) stop()
+      else start()
+    })
+
+    return true
+  }
+
   function wire() {
     const btn = document.getElementById("glazyr-framed-shot")
     if (btn) btn.addEventListener("click", startFramedScreenshot)
 
     wireMessages()
     loadLastCapture()
+
+    // React renders asynchronously; keep trying until the input exists.
+    const tryInstall = () => {
+      if (installMicButton()) return
+      setTimeout(tryInstall, 300)
+    }
+    tryInstall()
   }
 
   if (document.readyState === "loading") {
