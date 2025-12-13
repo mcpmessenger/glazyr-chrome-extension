@@ -23,4 +23,7 @@ pnpm-debug.log*
 # Release outputs
 release/
 
+# Accidental extracted release folders
+glazyr-chrome-extension-v*/
+
 
