@@ -114,8 +114,7 @@
     bar.addEventListener(
       "pointerdown",
       (e) => {
-        // Don’t start drag when clicking the close button
-        if (e.target === closeBtn) return
+        e.preventDefault()
         dragging = true
         const rect = host.getBoundingClientRect()
         dragOffsetX = e.clientX - rect.left
