@@ -1,4 +1,17 @@
 (() => {
+  function isRestrictedUrl(url) {
+    const u = String(url || "")
+    return (
+      u.startsWith("chrome://") ||
+      u.startsWith("chrome-extension://") ||
+      u.startsWith("edge://") ||
+      u.startsWith("about:") ||
+      u.startsWith("view-source:") ||
+      u.startsWith("devtools://") ||
+      u.startsWith("chrome.google.com/webstore")
+    )
+  }
+
   function ensureRegionSelectContentScript(tabId, cb) {
     // If the content script listener isn't present (common after updates),
     // inject the file and retry.
@@ -13,6 +26,11 @@
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       const tabId = tabs?.[0]?.id
       if (!tabId) return
+      const url = tabs?.[0]?.url
+      if (isRestrictedUrl(url)) {
+        setStatus("Can’t capture on chrome:// or other restricted pages. Open a normal website tab.")
+        return
+      }
       setStatus("Select an area on the page: drag to frame, release to capture (Esc cancels).")
       chrome.tabs.sendMessage(tabId, { type: "BEGIN_REGION_SELECT" }, () => {
         const err = chrome.runtime.lastError

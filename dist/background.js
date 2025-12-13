@@ -296,6 +296,27 @@
   chrome.action.onClicked.addListener((tab) => {
     const tabId = tab?.id
     if (!tabId) return
+    const url = String(tab?.url || "")
+
+    // Chrome blocks extensions from injecting into internal pages.
+    const isRestricted =
+      url.startsWith("chrome://") ||
+      url.startsWith("chrome-extension://") ||
+      url.startsWith("edge://") ||
+      url.startsWith("about:") ||
+      url.startsWith("view-source:") ||
+      url.startsWith("devtools://") ||
+      url.startsWith("chrome.google.com/webstore")
+
+    if (isRestricted) {
+      chrome.action.setBadgeText({ tabId, text: "X" })
+      chrome.action.setBadgeBackgroundColor({ tabId, color: "#c62828" })
+      chrome.action.setTitle({
+        tabId,
+        title: "Glazyr: can't open widget on this page (chrome:// and other restricted URLs). Open any normal website.",
+      })
+      return
+    }
 
     // First try: message the already-injected content script.
     chrome.tabs.sendMessage(tabId, { type: "TOGGLE_WIDGET" }, () => {
