@@ -73,7 +73,7 @@
     })
     safeRuntimeSendMessage({
       type: "CAPTURE_HINT",
-      text: "Drag to select an area on the page, then press Enter to capture (Esc to cancel).",
+      text: "Drag to select an area on the page, then release to capture (Esc to cancel).",
     })
   }
 
@@ -187,7 +187,7 @@
 
       if (sender?.tab?.id && (q.includes("framed screenshot") || q.includes("crop capture") || q.includes("crop") || q.includes("frame"))) {
         requestRegionSelect(sender.tab.id)
-        sendResponse({ type: "AI_RESPONSE", text: "Framed screenshot: drag to select an area, then press Enter to capture." })
+        sendResponse({ type: "AI_RESPONSE", text: "Framed screenshot: drag to select an area, then release to capture." })
         return true
       }
 

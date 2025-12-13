@@ -9,6 +9,7 @@
   let currentX = 0
   let currentY = 0
   let dragging = false
+  let confirmed = false
 
   function clamp(n, min, max) {
     return Math.max(min, Math.min(max, n))
@@ -21,6 +22,7 @@
   function cleanup() {
     active = false
     dragging = false
+    confirmed = false
     const el = getOverlay()
     if (el) el.remove()
     window.removeEventListener("keydown", onKeyDown, true)
@@ -48,8 +50,8 @@
 
     hud.textContent =
       width >= 1 && height >= 1
-        ? `Selected: ${Math.round(width)}×${Math.round(height)}  (Enter=Capture, Esc=Cancel)`
-        : `Drag to select an area  (Enter=Capture, Esc=Cancel)`
+        ? `Selected: ${Math.round(width)}×${Math.round(height)}  (Release=Capture, Esc=Cancel)`
+        : `Drag to select an area  (Release=Capture, Esc=Cancel)`
   }
 
   function getRect() {
@@ -70,12 +72,17 @@
   }
 
   function confirmSelection() {
+    if (!active || confirmed) return
     const rect = getRect()
     if (rect.width < 10 || rect.height < 10) {
-      alert("Selection too small. Drag a larger area, then press Enter.")
+      // Keep overlay open; just update HUD for guidance.
+      const overlay = getOverlay()
+      const hud = overlay?.querySelector?.(`#${HUD_ID}`)
+      if (hud) hud.textContent = "Selection too small. Drag a larger area (Esc cancels)."
       return
     }
 
+    confirmed = true
     chrome.runtime.sendMessage({
       type: "REGION_SELECTED",
       rect,
@@ -94,9 +101,6 @@
     if (e.key === "Escape") {
       e.preventDefault()
       cleanup()
-    } else if (e.key === "Enter") {
-      e.preventDefault()
-      confirmSelection()
     }
   }
 
@@ -192,6 +196,8 @@
         currentX = p.x
         currentY = p.y
         updateUI()
+        // Auto-confirm on release for a smoother flow (no Enter required).
+        confirmSelection()
       },
       true
     )

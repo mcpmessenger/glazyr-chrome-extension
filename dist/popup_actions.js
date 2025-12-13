@@ -38,7 +38,7 @@
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       const tabId = tabs?.[0]?.id
       if (!tabId) return
-      setStatus("Select an area on the page: drag to frame, Enter to capture, Esc to cancel.")
+      setStatus("Select an area on the page: drag to frame, release to capture (Esc cancels).")
       chrome.tabs.sendMessage(tabId, { type: "BEGIN_REGION_SELECT" }, () => {
         const err = chrome.runtime.lastError
         if (!err) return
