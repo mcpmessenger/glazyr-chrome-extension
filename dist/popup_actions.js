@@ -132,6 +132,27 @@
   // --- Whisper STT (mic button injected next to the React input) ---
   const OPENAI_KEY_STORAGE = "openaiApiKey"
 
+  function helpForMicPermissionError(raw) {
+    const msg = String(raw || "")
+    const id = chrome?.runtime?.id || "<extension-id>"
+    if (!msg) return ""
+
+    const lower = msg.toLowerCase()
+    if (lower.includes("permission dismissed") || lower.includes("permission denied") || lower.includes("notallowederror")) {
+      return (
+        "Microphone permission was dismissed/denied.\n\n" +
+        "Fix:\n" +
+        "1) Click the mic again and choose Allow.\n" +
+        "2) If Chrome won't prompt anymore: open `chrome://settings/content/microphone` and allow `chrome-extension://" +
+        id +
+        "`.\n" +
+        "3) Ensure the correct input device is selected in Microphone settings.\n"
+      )
+    }
+
+    return ""
+  }
+
   function getInputAndForm() {
     const root = document.getElementById("root")
     if (!root) return { form: null, input: null, sendBtn: null }
@@ -209,7 +230,8 @@
             }
             if (!res?.ok) {
               setStatus("STT error.")
-              setResult(res?.error || "Could not start recording.")
+              const errText = res?.error || "Could not start recording."
+              setResult(helpForMicPermissionError(errText) || errText)
               return
             }
             recording = true
@@ -219,7 +241,8 @@
           })
         } catch (e) {
           setStatus("Mic permission denied or unavailable.")
-          setResult(String(e?.message || e))
+          const errText = String(e?.message || e)
+          setResult(helpForMicPermissionError(errText) || errText)
         }
       })
     }
@@ -234,7 +257,8 @@
           }
           if (!res?.ok) {
             setStatus("STT error.")
-            setResult(res?.error || "Could not stop recording.")
+            const errText = res?.error || "Could not stop recording."
+            setResult(helpForMicPermissionError(errText) || errText)
             return
           }
           // actual transcript comes via STT_RESULT message
