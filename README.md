@@ -2,6 +2,10 @@
 
 Vision-first AI assistant for web browsing (Chrome Extension, Manifest V3).
 
+## Architecture
+
+![Glazyr architecture](./Screenshot%202025-12-12%20230448.png)
+
 ## Install (Load Unpacked)
 
 1. Clone this repo.
