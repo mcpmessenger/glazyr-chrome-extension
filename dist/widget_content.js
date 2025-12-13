@@ -7,11 +7,19 @@
   }
 
   function loadState(cb) {
-    chrome.storage.local.get([STATE_KEY], (res) => cb(res?.[STATE_KEY] || null))
+    try {
+      chrome.storage.local.get([STATE_KEY], (res) => cb(res?.[STATE_KEY] || null))
+    } catch {
+      cb(null)
+    }
   }
 
   function saveState(state) {
-    chrome.storage.local.set({ [STATE_KEY]: state })
+    try {
+      chrome.storage.local.set({ [STATE_KEY]: state })
+    } catch {
+      // ignore when extension context is invalidated (reload/navigation)
+    }
   }
 
   function removeWidget() {

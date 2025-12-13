@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Glazyr Chrome Extension",
-  "version": "1.0.11",
+  "version": "1.0.12",
   "description": "Vision-first AI assistant for web browsing.",
   "icons": {
     "16": "icons/icon16.png",
@@ -13,7 +13,8 @@
     "storage",
     "webNavigation",
     "activeTab",
-    "scripting"
+    "scripting",
+    "offscreen"
   ],
   "host_permissions": [
     "<all_urls>"

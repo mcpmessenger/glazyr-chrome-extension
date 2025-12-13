@@ -97,6 +97,25 @@
       } else if (msg.type === "ANALYSIS_ERROR") {
         setStatus("Error.")
         setResult(msg.text || "Unknown error")
+      } else if (msg.type === "STT_STATUS") {
+        if (msg.text) setStatus(msg.text)
+      } else if (msg.type === "STT_ERROR") {
+        setStatus("STT error.")
+        setResult(msg.text || "Unknown STT error")
+      } else if (msg.type === "STT_RESULT") {
+        const text = String(msg.text || "").trim()
+        if (!text) {
+          setStatus("No speech detected.")
+          return
+        }
+        setStatus("STT inserted. Edit if needed, then Send.")
+        const { input } = getInputAndForm()
+        if (input) {
+          setReactInputValue(input, text)
+          input.focus()
+        } else {
+          setResult(text)
+        }
       }
     })
   }
@@ -177,73 +196,27 @@
       form.appendChild(btn)
     }
 
-    let mediaRecorder = null
-    let chunks = []
-    let stream = null
     let recording = false
 
     async function start() {
       ensureKeyThen(async () => {
         try {
-          stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-          const mimeType =
-            MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? "audio/webm;codecs=opus" : "audio/webm"
-          mediaRecorder = new MediaRecorder(stream, { mimeType })
-          chunks = []
-
-          mediaRecorder.ondataavailable = (e) => {
-            if (e.data && e.data.size > 0) chunks.push(e.data)
-          }
-          mediaRecorder.onstop = async () => {
-            try {
-              const blob = new Blob(chunks, { type: mimeType })
-              setStatus("Transcribing…")
-              const audio = await blobToArrayBuffer(blob)
-
-              chrome.runtime.sendMessage(
-                { type: "STT_TRANSCRIBE", mimeType: blob.type || mimeType, audio },
-                (res) => {
-                  if (chrome.runtime.lastError) {
-                    setStatus("STT error.")
-                    setResult(chrome.runtime.lastError.message)
-                    return
-                  }
-                  if (!res?.ok) {
-                    setStatus("STT error.")
-                    setResult(res?.error || "Unknown STT error")
-                    return
-                  }
-
-                  const text = String(res.text || "").trim()
-                  if (!text) {
-                    setStatus("No speech detected.")
-                    return
-                  }
-
-                  setStatus("STT inserted. Edit if needed, then Send.")
-                  setReactInputValue(input, text)
-                  input.focus()
-                }
-              )
-            } finally {
-              // cleanup stream
-              try {
-                stream?.getTracks?.().forEach((t) => t.stop())
-              } catch {}
-              stream = null
-              mediaRecorder = null
-              chunks = []
-              recording = false
-              btn.classList.remove("recording")
-              btn.textContent = "🎙"
+          chrome.runtime.sendMessage({ type: "STT_RECORD_START" }, (res) => {
+            if (chrome.runtime.lastError) {
+              setStatus("STT error.")
+              setResult(chrome.runtime.lastError.message)
+              return
             }
-          }
-
-          recording = true
-          btn.classList.add("recording")
-          btn.textContent = "⏹"
-          setStatus("Recording… click again to stop.")
-          mediaRecorder.start()
+            if (!res?.ok) {
+              setStatus("STT error.")
+              setResult(res?.error || "Could not start recording.")
+              return
+            }
+            recording = true
+            btn.classList.add("recording")
+            btn.textContent = "⏹"
+            setStatus("Recording… click again to stop.")
+          })
         } catch (e) {
           setStatus("Mic permission denied or unavailable.")
           setResult(String(e?.message || e))
@@ -253,7 +226,23 @@
 
     function stop() {
       try {
-        mediaRecorder?.stop()
+        chrome.runtime.sendMessage({ type: "STT_RECORD_STOP" }, (res) => {
+          if (chrome.runtime.lastError) {
+            setStatus("STT error.")
+            setResult(chrome.runtime.lastError.message)
+            return
+          }
+          if (!res?.ok) {
+            setStatus("STT error.")
+            setResult(res?.error || "Could not stop recording.")
+            return
+          }
+          // actual transcript comes via STT_RESULT message
+          setStatus("Transcribing…")
+        })
+        recording = false
+        btn.classList.remove("recording")
+        btn.textContent = "🎙"
       } catch (e) {
         setStatus("STT error.")
         setResult(String(e?.message || e))

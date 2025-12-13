@@ -58,6 +58,17 @@
     return String(json?.text || "")
   }
 
+  async function ensureOffscreenDocument() {
+    if (!chrome?.offscreen?.createDocument) throw new Error("Offscreen API not available.")
+    const has = chrome.offscreen.hasDocument ? await chrome.offscreen.hasDocument() : false
+    if (has) return
+    await chrome.offscreen.createDocument({
+      url: "offscreen.html",
+      reasons: ["USER_MEDIA"],
+      justification: "Record microphone audio for Whisper STT from the extension UI.",
+    })
+  }
+
   async function dataUrlToBlob(dataUrl) {
     const res = await fetch(dataUrl)
     return await res.blob()
@@ -222,6 +233,62 @@
         (text) => sendResponse({ ok: true, text }),
         (err) => sendResponse({ ok: false, error: String(err?.message || err) })
       )
+      return true
+    }
+
+    // New STT flow (record in offscreen doc to avoid site Permissions-Policy)
+    if (msg?.type === "STT_RECORD_START") {
+      ensureOffscreenDocument()
+        .then(() => {
+          safeRuntimeSendMessage({ type: "STT_STATUS", text: "Requesting microphone…" })
+          chrome.runtime.sendMessage({ type: "OFFSCREEN_RECORD_START" }, (res) => {
+            if (chrome.runtime.lastError) {
+              sendResponse({ ok: false, error: chrome.runtime.lastError.message })
+              return
+            }
+            if (!res?.ok) {
+              sendResponse({ ok: false, error: res?.error || "Failed to start recording." })
+              return
+            }
+            safeRuntimeSendMessage({ type: "STT_STATUS", text: "Recording… click mic to stop." })
+            sendResponse({ ok: true })
+          })
+        })
+        .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }))
+      return true
+    }
+
+    if (msg?.type === "STT_RECORD_STOP") {
+      ensureOffscreenDocument()
+        .then(() => {
+          safeRuntimeSendMessage({ type: "STT_STATUS", text: "Stopping…" })
+          chrome.runtime.sendMessage({ type: "OFFSCREEN_RECORD_STOP" }, (res) => {
+            if (chrome.runtime.lastError) {
+              sendResponse({ ok: false, error: chrome.runtime.lastError.message })
+              return
+            }
+            if (!res?.ok) {
+              sendResponse({ ok: false, error: res?.error || "Failed to stop recording." })
+              return
+            }
+            safeRuntimeSendMessage({ type: "STT_STATUS", text: "Transcribing…" })
+            sendResponse({ ok: true })
+          })
+        })
+        .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }))
+      return true
+    }
+
+    if (msg?.type === "OFFSCREEN_AUDIO_READY") {
+      transcribeWhisper({ audio: msg.audio, mimeType: msg.mimeType }).then(
+        (text) => {
+          safeRuntimeSendMessage({ type: "STT_RESULT", text })
+        },
+        (err) => {
+          safeRuntimeSendMessage({ type: "STT_ERROR", text: String(err?.message || err) })
+        }
+      )
+      sendResponse?.({ ok: true })
       return true
     }
 
