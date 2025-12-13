@@ -10,18 +10,40 @@
             height: 64px;
             display: flex;
             align-items: center;
-            justify-content: center;
+            justify-content: space-between;
             background: #0b0f14;
             border-bottom: 1px solid rgba(255,255,255,0.08);
+            padding: 0 12px;
+        }
+        #glazyr-header-left {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: #e8f1ff;
+            font-size: 13px;
+            font-weight: 600;
+            letter-spacing: 0.2px;
         }
         #glazyr-header img {
             width: 40px;
             height: 40px;
             border-radius: 10px;
         }
+        #glazyr-framed-shot {
+            height: 34px;
+            padding: 0 10px;
+            border-radius: 10px;
+            border: 1px solid rgba(255,255,255,0.14);
+            background: rgba(255,255,255,0.06);
+            color: #e8f1ff;
+            cursor: pointer;
+        }
+        #glazyr-framed-shot:hover {
+            background: rgba(255,255,255,0.10);
+        }
         #root {
             flex: 1;
             min-height: 0;
             display: flex;
             flex-direction: column;
-        }</style><script defer="defer" src="popup.js"></script></head><body><div id="glazyr-header"><img src="logo.png" alt="Glazyr logo"></div><div id="root"></div><script src="popup.js"></script></body></html>
+        }</style><script defer="defer" src="popup.js"></script></head><body><div id="glazyr-header"><div id="glazyr-header-left"><img src="logo.png" alt="Glazyr logo"><span>Glazyr</span></div><button id="glazyr-framed-shot" type="button" title="Mock framed screenshot (crop capture)">Framed shot</button></div><div id="root"></div><script src="popup.js"></script><script src="popup_actions.js"></script></body></html>

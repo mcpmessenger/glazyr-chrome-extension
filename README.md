@@ -28,9 +28,19 @@ See `dist/manifest.json` for the authoritative list.
 ## Image handling features
 
 - **Drag-and-drop analysis**: drag an image file or an image element onto the page to send it to the background for (mock) analysis.
-- **Crop capture (mock)**: trigger via a query (e.g. “Start crop capture”).
+- **Framed screenshot / crop capture (mock)**: capture a selected region (simulated).
 
-> Note: crop capture UI + real image processing are mocked in this proof-of-concept.
+> Note: selection UI + real image processing are mocked in this proof-of-concept.
+
+## How to take a “framed screenshot” (crop capture)
+
+1. Open any webpage.
+2. Click the Glazyr extension icon to open the popup.
+3. Click **Framed shot**.
+4. You’ll see an alert indicating selection mode is active (simulated), then the extension sends a mock cropped image for analysis.
+
+Alternative (via text query in the popup):
+- Type **“framed screenshot”** (or **“crop capture”**) and submit.
 
 ## Update the extension logo (icons)
 
