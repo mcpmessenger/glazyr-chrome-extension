@@ -23,7 +23,8 @@
       if (e.data && e.data.size > 0) chunks.push(e.data)
     }
 
-    recorder.start()
+    // Use a timeslice so we reliably get data chunks even for short recordings.
+    recorder.start(250)
   }
 
   async function stopRecordingAndReturnAudio() {
@@ -45,6 +46,10 @@
         }
       }
       try {
+        // Flush any pending data before stopping.
+        try {
+          localRecorder.requestData?.()
+        } catch {}
         localRecorder.stop()
       } catch (e) {
         reject(e)

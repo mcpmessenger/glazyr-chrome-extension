@@ -33,15 +33,29 @@
     return "audio.webm"
   }
 
+  function normalizeAudioMimeType(mimeType) {
+    const mt = String(mimeType || "").toLowerCase()
+    if (!mt) return "audio/webm"
+    if (mt.includes("webm")) return "audio/webm"
+    if (mt.includes("ogg")) return "audio/ogg"
+    if (mt.includes("wav")) return "audio/wav"
+    if (mt.includes("mpeg") || mt.includes("mp3")) return "audio/mpeg"
+    if (mt.includes("mp4") || mt.includes("m4a")) return "audio/mp4"
+    return "audio/webm"
+  }
+
   async function transcribeWhisper({ audio, mimeType }) {
     const apiKey = await getOpenAIKey()
     if (!apiKey) throw new Error("OpenAI API key not set. Click the mic and enter your key.")
     if (!audio) throw new Error("No audio provided.")
+    const bytes = audio?.byteLength ?? audio?.length ?? 0
+    if (bytes && bytes < 2048) throw new Error("Recorded audio was empty/too short. Try recording for 1–2 seconds.")
 
-    const blob = new Blob([audio], { type: mimeType || "audio/webm" })
+    const normalizedType = normalizeAudioMimeType(mimeType)
+    const blob = new Blob([audio], { type: normalizedType })
     const form = new FormData()
     form.append("model", "whisper-1")
-    form.append("file", blob, guessAudioFileName(mimeType))
+    form.append("file", blob, guessAudioFileName(normalizedType))
 
     const resp = await fetch("https://api.openai.com/v1/audio/transcriptions", {
       method: "POST",
