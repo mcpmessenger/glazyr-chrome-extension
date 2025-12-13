@@ -107,35 +107,6 @@
     showCapturePanel(true)
   }
 
-  function installCloseButton() {
-    const { form, sendBtn } = getInputAndForm()
-    if (!form || !sendBtn) return false
-    if (form.querySelector(".glazyr-close-btn")) return true
-
-    const btn = document.createElement("button")
-    btn.type = "button"
-    btn.className = "glazyr-close-btn"
-    btn.title = "Close widget"
-    btn.textContent = "×"
-
-    // Place at the far right of the bottom row (before Send).
-    try {
-      sendBtn.insertAdjacentElement("beforebegin", btn)
-    } catch {
-      form.appendChild(btn)
-    }
-
-    btn.addEventListener("click", () => {
-      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-        const tabId = tabs?.[0]?.id
-        if (!tabId) return
-        chrome.tabs.sendMessage(tabId, { type: "TOGGLE_WIDGET" }, () => void chrome.runtime.lastError)
-      })
-    })
-
-    return true
-  }
-
   function wireMessages() {
     chrome.runtime.onMessage.addListener((msg) => {
       if (!msg?.type) return
@@ -350,6 +321,17 @@
     const btn = document.getElementById("glazyr-framed-shot")
     if (btn) btn.addEventListener("click", startFramedScreenshot)
 
+    const closeBtn = document.getElementById("glazyr-close-widget")
+    if (closeBtn) {
+      closeBtn.addEventListener("click", () => {
+        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+          const tabId = tabs?.[0]?.id
+          if (!tabId) return
+          chrome.tabs.sendMessage(tabId, { type: "TOGGLE_WIDGET" }, () => void chrome.runtime.lastError)
+        })
+      })
+    }
+
     wireMessages()
     loadLastCapture()
 
@@ -358,7 +340,6 @@
       const ensure = () => {
         try {
           installMicButton()
-          installCloseButton()
         } catch (e) {
           setStatus("Mic UI error.")
           setResult(String(e?.message || e))
