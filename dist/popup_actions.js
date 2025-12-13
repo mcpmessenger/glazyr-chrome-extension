@@ -54,12 +54,34 @@
     if (s) s.textContent = text
   }
 
+  function isExpanded() {
+    const img = el("glazyr-capture-preview")
+    const res = el("glazyr-capture-result")
+    const imgVisible = img && img.style.display !== "none" && !!img.getAttribute("src")
+    const resVisible = res && res.style.display !== "none" && !!res.textContent
+    return !!(imgVisible || resVisible)
+  }
+
+  function autoCondenseStatus() {
+    // Keep the panel as one line unless we have preview/result.
+    if (isExpanded()) return
+    const s = el("glazyr-capture-status")
+    if (!s) return
+    // Replace verbose tip with a compact default once the UI is loaded.
+    if (s.textContent && s.textContent.startsWith("Tip:")) {
+      s.textContent = "Ready."
+    }
+    // Also collapse "Done." into "Ready." to avoid wasting vertical space.
+    if (s.textContent === "Done.") s.textContent = "Ready."
+  }
+
   function setPreview(dataUrl) {
     const img = el("glazyr-capture-preview")
     if (!img) return
     if (!dataUrl) {
       img.style.display = "none"
       img.removeAttribute("src")
+      autoCondenseStatus()
       return
     }
     img.src = dataUrl
@@ -72,6 +94,7 @@
     if (!text) {
       r.style.display = "none"
       r.textContent = ""
+      autoCondenseStatus()
       return
     }
     r.textContent = text
@@ -94,6 +117,7 @@
         setStatus("Done.")
         if (msg.imageDataUrl) setPreview(msg.imageDataUrl)
         if (msg.text) setResult(msg.text)
+        autoCondenseStatus()
       } else if (msg.type === "ANALYSIS_ERROR") {
         setStatus("Error.")
         setResult(msg.text || "Unknown error")
@@ -116,6 +140,7 @@
         } else {
           setResult(text)
         }
+        autoCondenseStatus()
       }
     })
   }

@@ -49,12 +49,13 @@
     host.style.boxShadow = "0 18px 60px rgba(0,0,0,0.45)"
 
     const bar = document.createElement("div")
-    bar.style.height = "38px"
+    bar.style.height = "30px"
     bar.style.display = "flex"
     bar.style.alignItems = "center"
     bar.style.justifyContent = "space-between"
-    bar.style.padding = "0 10px"
+    bar.style.padding = "0 8px"
     bar.style.cursor = "move"
+    bar.title = "Drag to move. Resize from the bottom-right corner."
     bar.style.background = "rgba(11,15,20,0.96)"
     bar.style.border = "1px solid rgba(255,255,255,0.10)"
     bar.style.borderBottom = "0"
@@ -75,16 +76,12 @@
     actions.style.alignItems = "center"
     actions.style.gap = "8px"
 
-    const hint = document.createElement("div")
-    hint.textContent = "Drag to move • Resize from corner"
-    hint.style.opacity = "0.75"
-
     const closeBtn = document.createElement("button")
     closeBtn.type = "button"
     closeBtn.textContent = "×"
     closeBtn.title = "Close"
-    closeBtn.style.width = "28px"
-    closeBtn.style.height = "28px"
+    closeBtn.style.width = "24px"
+    closeBtn.style.height = "24px"
     closeBtn.style.borderRadius = "10px"
     closeBtn.style.border = "1px solid rgba(255,255,255,0.14)"
     closeBtn.style.background = "rgba(255,255,255,0.06)"
@@ -94,7 +91,6 @@
       removeWidget()
     })
 
-    actions.appendChild(hint)
     actions.appendChild(closeBtn)
 
     bar.appendChild(title)
@@ -106,7 +102,7 @@
     // (Many sites block mic in iframes unless explicitly allowed.)
     frame.allow = "microphone"
     frame.style.width = "100%"
-    frame.style.height = "calc(100% - 38px)"
+    frame.style.height = "calc(100% - 30px)"
     frame.style.border = "1px solid rgba(255,255,255,0.10)"
     frame.style.borderTop = "0"
     frame.style.borderBottomLeftRadius = "14px"
