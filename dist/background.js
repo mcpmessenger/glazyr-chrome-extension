@@ -92,6 +92,19 @@
     })
   }
 
+  async function resetOffscreenDocument() {
+    if (!chrome?.offscreen?.createDocument) return
+    try {
+      const has = chrome.offscreen.hasDocument ? await chrome.offscreen.hasDocument() : false
+      if (has && chrome.offscreen.closeDocument) {
+        await chrome.offscreen.closeDocument()
+      }
+    } catch {
+      // ignore
+    }
+    await ensureOffscreenDocument()
+  }
+
   async function dataUrlToBlob(dataUrl) {
     const res = await fetch(dataUrl)
     return await res.blob()
@@ -261,7 +274,8 @@
 
     // New STT flow (record in offscreen doc to avoid site Permissions-Policy)
     if (msg?.type === "STT_RECORD_START") {
-      ensureOffscreenDocument()
+      // Ensure we run the latest offscreen recorder code after updates.
+      resetOffscreenDocument()
         .then(() => {
           safeRuntimeSendMessage({ type: "STT_STATUS", text: "Requesting microphone…" })
           chrome.runtime.sendMessage({ type: "OFFSCREEN_RECORD_START" }, (res) => {
@@ -303,7 +317,9 @@
     }
 
     if (msg?.type === "OFFSCREEN_AUDIO_READY") {
-      transcribeWhisper({ audioBytes: msg.audioBytes, mimeType: msg.mimeType }).then(
+      // Back-compat: older offscreen recorders sent `audio` (ArrayBuffer) instead of `audioBytes` (Uint8Array)
+      const audioPayload = msg.audioBytes ?? msg.audio
+      transcribeWhisper({ audioBytes: audioPayload, mimeType: msg.mimeType }).then(
         (text) => {
           safeRuntimeSendMessage({ type: "STT_RESULT", text })
         },
