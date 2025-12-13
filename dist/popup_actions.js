@@ -117,9 +117,16 @@
     const root = document.getElementById("root")
     if (!root) return { form: null, input: null, sendBtn: null }
 
-    const input = root.querySelector('input[placeholder="Ask Glazyr a question..."]')
+    // React bundle may change placeholder; keep this selector broad.
+    const input =
+      root.querySelector('input[placeholder="Ask Glazyr a question..."]') ||
+      root.querySelector('form input[type="text"]') ||
+      root.querySelector('input[type="text"]')
     const form = input ? input.closest("form") : null
-    const sendBtn = form ? form.querySelector('button[type="submit"]') : null
+    const sendBtn =
+      form?.querySelector?.('button[type="submit"]') ||
+      form?.querySelector?.("button") ||
+      null
     return { form, input, sendBtn }
   }
 
@@ -164,7 +171,11 @@
     btn.textContent = "🎙"
 
     // Insert between input and Send button (works with the existing flex layout)
-    sendBtn.insertAdjacentElement("beforebegin", btn)
+    try {
+      sendBtn.insertAdjacentElement("beforebegin", btn)
+    } catch {
+      form.appendChild(btn)
+    }
 
     let mediaRecorder = null
     let chunks = []
@@ -264,12 +275,28 @@
     wireMessages()
     loadLastCapture()
 
-    // React renders asynchronously; keep trying until the input exists.
-    const tryInstall = () => {
-      if (installMicButton()) return
-      setTimeout(tryInstall, 300)
+    // React renders asynchronously and may re-render; keep mic button installed.
+    try {
+      const ensure = () => {
+        try {
+          installMicButton()
+        } catch (e) {
+          setStatus("Mic UI error.")
+          setResult(String(e?.message || e))
+        }
+      }
+
+      ensure()
+
+      const root = document.getElementById("root")
+      if (root && "MutationObserver" in window) {
+        const mo = new MutationObserver(() => ensure())
+        mo.observe(root, { childList: true, subtree: true })
+      }
+    } catch (e) {
+      setStatus("Mic UI error.")
+      setResult(String(e?.message || e))
     }
-    tryInstall()
   }
 
   if (document.readyState === "loading") {
