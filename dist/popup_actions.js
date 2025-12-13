@@ -3,13 +3,81 @@
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       const tabId = tabs?.[0]?.id
       if (!tabId) return
-      chrome.tabs.sendMessage(tabId, { type: "START_CROP_CAPTURE" })
+      setStatus("Select an area on the page: drag to frame, Enter to capture, Esc to cancel.")
+      chrome.tabs.sendMessage(tabId, { type: "BEGIN_REGION_SELECT" })
+    })
+  }
+
+  function el(id) {
+    return document.getElementById(id)
+  }
+
+  function setStatus(text) {
+    const s = el("glazyr-capture-status")
+    if (s) s.textContent = text
+  }
+
+  function setPreview(dataUrl) {
+    const img = el("glazyr-capture-preview")
+    if (!img) return
+    if (!dataUrl) {
+      img.style.display = "none"
+      img.removeAttribute("src")
+      return
+    }
+    img.src = dataUrl
+    img.style.display = "block"
+  }
+
+  function setResult(text) {
+    const r = el("glazyr-capture-result")
+    if (!r) return
+    if (!text) {
+      r.style.display = "none"
+      r.textContent = ""
+      return
+    }
+    r.textContent = text
+    r.style.display = "block"
+  }
+
+  function wireMessages() {
+    chrome.runtime.onMessage.addListener((msg) => {
+      if (!msg?.type) return
+
+      if (msg.type === "CAPTURE_HINT") {
+        if (msg.text) setStatus(msg.text)
+      } else if (msg.type === "CAPTURE_STARTED") {
+        setStatus("Capturing screenshot…")
+        setResult("")
+      } else if (msg.type === "CAPTURE_DONE") {
+        setStatus("Captured. Analyzing…")
+        if (msg.imageDataUrl) setPreview(msg.imageDataUrl)
+      } else if (msg.type === "ANALYSIS_RESULT") {
+        setStatus("Done.")
+        if (msg.imageDataUrl) setPreview(msg.imageDataUrl)
+        if (msg.text) setResult(msg.text)
+      } else if (msg.type === "ANALYSIS_ERROR") {
+        setStatus("Error.")
+        setResult(msg.text || "Unknown error")
+      }
+    })
+  }
+
+  function loadLastCapture() {
+    chrome.runtime.sendMessage({ type: "GET_LAST_CAPTURE" }, (res) => {
+      const last = res?.lastCapture
+      if (!last) return
+      if (last.imageDataUrl) setPreview(last.imageDataUrl)
+      if (last.analysisText) setResult(last.analysisText)
     })
   }
 
   function wire() {
     const btn = document.getElementById("glazyr-framed-shot")
     if (btn) btn.addEventListener("click", startFramedScreenshot)
+    wireMessages()
+    loadLastCapture()
   }
 
   if (document.readyState === "loading") {
