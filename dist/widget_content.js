@@ -30,16 +30,37 @@
   function createWidget(state) {
     removeWidget()
 
+    const vw = window.innerWidth
+    const vh = window.innerHeight
+    const margin = 16
+
+    const minW = 320
+    const minH = 420
+
+    const desiredW = Number(state?.w ?? 380)
+    const desiredH = Number(state?.h ?? 560)
+
+    // Default to a size that fits on smaller screens.
+    const w = clamp(desiredW, minW, Math.max(minW, vw - margin * 2))
+    const h = clamp(desiredH, minH, Math.max(minH, vh - margin * 2))
+
+    // Default position: slightly higher and never off-screen.
+    const defaultX = Math.max(margin, vw - w - margin)
+    const defaultY = 48
+
+    const x = clamp(Number(state?.x ?? defaultX), 0, Math.max(0, vw - w))
+    const y = clamp(Number(state?.y ?? defaultY), 0, Math.max(0, vh - h))
+
     const host = document.createElement("div")
     host.id = WIDGET_ID
     host.style.position = "fixed"
     host.style.zIndex = "2147483646"
-    host.style.left = `${state?.x ?? Math.max(16, window.innerWidth - 420)}px`
-    host.style.top = `${state?.y ?? 80}px`
-    host.style.width = `${state?.w ?? 380}px`
-    host.style.height = `${state?.h ?? 560}px`
-    host.style.minWidth = "320px"
-    host.style.minHeight = "420px"
+    host.style.left = `${x}px`
+    host.style.top = `${y}px`
+    host.style.width = `${w}px`
+    host.style.height = `${h}px`
+    host.style.minWidth = `${minW}px`
+    host.style.minHeight = `${minH}px`
     host.style.maxWidth = "95vw"
     host.style.maxHeight = "95vh"
     host.style.background = "transparent"

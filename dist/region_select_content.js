@@ -11,6 +11,38 @@
   let dragging = false
   let confirmed = false
 
+  function normalizeDomain(input) {
+    const raw = String(input || "").trim().toLowerCase()
+    if (!raw) return ""
+    const noScheme = raw.replace(/^[a-z]+:\/\//i, "")
+    const hostAndMaybePort = noScheme.split("/")[0]
+    return hostAndMaybePort.split(":")[0]
+  }
+
+  function hostMatchesPattern(host, pattern) {
+    const h = normalizeDomain(host)
+    const p = normalizeDomain(pattern)
+    if (!h || !p) return false
+    if (p === "*") return true
+    if (p.startsWith("*.")) {
+      const root = p.slice(2)
+      return h === root || h.endsWith("." + root)
+    }
+    return h === p || h.endsWith("." + p)
+  }
+
+  function policyAllowsCapture() {
+    const p = (window && window.__glazyrPolicy) || {}
+    if (p.killSwitchEngaged) return { ok: false, reason: "Kill switch is engaged." }
+    const allowed = Array.isArray(p.allowedDomains) ? p.allowedDomains : []
+    if (allowed.length) {
+      const host = String(window.location.hostname || "")
+      const ok = allowed.some((d) => hostMatchesPattern(host, d))
+      if (!ok) return { ok: false, reason: "Domain is not in allowed domains." }
+    }
+    return { ok: true, reason: "" }
+  }
+
   function clamp(n, min, max) {
     return Math.max(min, Math.min(max, n))
   }
@@ -106,6 +138,13 @@
 
   function beginSelection() {
     if (active) return
+    const gate = policyAllowsCapture()
+    if (!gate.ok) {
+      try {
+        alert(`Glazyr blocked capture: ${gate.reason}`)
+      } catch {}
+      return
+    }
     active = true
 
     const existing = getOverlay()

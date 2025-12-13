@@ -37,13 +37,20 @@
         "content.js",
         "drag_drop_content.js",
         "region_select_content.js",
-        "widget_content.js"
+        "widget_content.js",
+        "launcher_content.js"
       ]
     }
   ],
   "web_accessible_resources": [
     {
-      "resources": ["popup.html", "popup.js", "popup_actions.js", "logo.png"],
+      "resources": [
+        "popup.html",
+        "popup.js",
+        "popup_actions.js",
+        "logo.png",
+        "icons/*"
+      ],
       "matches": ["<all_urls>"]
     }
   ]

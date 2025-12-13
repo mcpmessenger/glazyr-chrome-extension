@@ -1,128 +1,160 @@
-<!doctype html><html><head><meta charset="utf-8"><title>Glazyr AI Assistant</title><style>html, body {
-            width: 100%;
-            height: 100%;
-            margin: 0;
-            font-family: Arial, sans-serif;
-            display: flex;
-            flex-direction: column;
-        }
-        #glazyr-header {
-            height: 52px;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            background: #0b0f14;
-            border-bottom: 1px solid rgba(255,255,255,0.08);
-            padding: 0 12px;
-        }
-        #glazyr-header-left {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            color: #e8f1ff;
-            font-size: 13px;
-            font-weight: 600;
-            letter-spacing: 0.2px;
-        }
-        #glazyr-header img {
-            width: 32px;
-            height: 32px;
-            border-radius: 10px;
-        }
-        #glazyr-framed-shot {
-            height: 34px;
-            padding: 0 10px;
-            border-radius: 10px;
-            border: 1px solid rgba(255,255,255,0.14);
-            background: rgba(255,255,255,0.06);
-            color: #e8f1ff;
-            cursor: pointer;
-        }
-        #glazyr-framed-shot:hover {
-            background: rgba(255,255,255,0.10);
-        }
-        #glazyr-close-widget {
-            height: 34px;
-            width: 34px;
-            min-width: 34px;
-            padding: 0;
-            border-radius: 10px;
-            border: 1px solid rgba(255,255,255,0.14);
-            background: rgba(255,255,255,0.06);
-            color: #e8f1ff;
-            cursor: pointer;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 18px;
-            line-height: 1;
-        }
-        #glazyr-close-widget:hover {
-            background: rgba(255,255,255,0.10);
-        }
-        #glazyr-header-actions {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-        #glazyr-capture-panel {
-            display: none;
-            padding: 4px 10px;
-            background: #0b0f14;
-            border-bottom: 1px solid rgba(255,255,255,0.08);
-            color: #e8f1ff;
-            font-size: 11px;
-            line-height: 1.2;
-        }
-        #glazyr-capture-status {
-            opacity: 0.95;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-        }
-        #glazyr-capture-preview {
-            margin-top: 8px;
-            display: none;
-            width: 100%;
-            max-height: 140px;
-            object-fit: contain;
-            border-radius: 10px;
-            border: 1px solid rgba(255,255,255,0.12);
-            background: rgba(255,255,255,0.04);
-        }
-        #glazyr-capture-result {
-            margin-top: 8px;
-            display: none;
-            padding: 8px 10px;
-            border-radius: 10px;
-            border: 1px solid rgba(255,255,255,0.12);
-            background: rgba(255,255,255,0.04);
-            white-space: pre-wrap;
-        }
-        .glazyr-mic-btn {
-            margin-left: 8px;
-            width: 36px;
-            min-width: 36px;
-            height: 34px;
-            border-radius: 10px;
-            border: 1px solid rgba(0,0,0,0.12);
-            background: #ffffff;
-            color: #0b0f14;
-            cursor: pointer;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 16px;
-            line-height: 1;
-        }
-        .glazyr-mic-btn.recording {
-            background: #ffebee;
-            border-color: rgba(244,67,54,0.35);
-            color: #c62828;
-        }
-        #root {
-            flex: 1;
-            min-height: 0;
-            display: flex;
-            flex-direction: column;
-        }</style><script defer="defer" src="popup.js"></script></head><body><div id="glazyr-header"><div id="glazyr-header-left"><img src="logo.png" alt="Glazyr logo"></div><div id="glazyr-header-actions"><button id="glazyr-framed-shot" type="button" title="Viewport-only framed screenshot">Framed shot</button><button id="glazyr-close-widget" type="button" title="Close">×</button></div></div><div id="glazyr-capture-panel"><div id="glazyr-capture-status"></div><img id="glazyr-capture-preview" alt="Cropped preview"><div id="glazyr-capture-result"></div></div><div id="root"></div><script src="popup.js"></script><script src="popup_actions.js"></script></body></html>
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Glazyr AI Assistant</title>
+    <style>
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        font-family: Arial, sans-serif;
+        display: flex;
+        flex-direction: column;
+        background: #0b0f14;
+      }
+
+      #glazyr-header {
+        height: 52px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        background: #0b0f14;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        padding: 0 12px;
+        flex: 0 0 auto;
+      }
+
+      #glazyr-header-left {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        color: #e8f1ff;
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: 0.2px;
+      }
+
+      #glazyr-header img {
+        width: 32px;
+        height: 32px;
+        border-radius: 10px;
+      }
+
+      #glazyr-header-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      #glazyr-framed-shot {
+        height: 34px;
+        padding: 0 10px;
+        border-radius: 10px;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        background: rgba(255, 255, 255, 0.06);
+        color: #e8f1ff;
+        cursor: pointer;
+      }
+      #glazyr-framed-shot:hover {
+        background: rgba(255, 255, 255, 0.1);
+      }
+
+      #glazyr-close-widget {
+        height: 34px;
+        width: 34px;
+        min-width: 34px;
+        padding: 0;
+        border-radius: 10px;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        background: rgba(255, 255, 255, 0.06);
+        color: #e8f1ff;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 18px;
+        line-height: 1;
+      }
+      #glazyr-close-widget:hover {
+        background: rgba(255, 255, 255, 0.1);
+      }
+
+      #glazyr-capture-panel {
+        display: none;
+        padding: 6px 10px;
+        background: #0b0f14;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        color: #e8f1ff;
+        font-size: 11px;
+        line-height: 1.2;
+        overflow: hidden;
+        flex: 0 0 auto;
+      }
+
+      #glazyr-capture-status {
+        opacity: 0.95;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      /* Screenshot preview + dedicated OCR panel removed (OCR prints into chat). */
+
+      .glazyr-mic-btn {
+        margin-left: 8px;
+        width: 36px;
+        min-width: 36px;
+        height: 34px;
+        border-radius: 10px;
+        border: 1px solid rgba(0, 0, 0, 0.12);
+        background: #ffffff;
+        color: #0b0f14;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 16px;
+        line-height: 1;
+      }
+
+      .glazyr-mic-btn.recording {
+        background: #ffebee;
+        border-color: rgba(244, 67, 54, 0.35);
+        color: #c62828;
+      }
+
+      #root {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        background: #ffffff;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="glazyr-header">
+      <div id="glazyr-header-left">
+        <img src="logo.png" alt="Glazyr logo" />
+      </div>
+      <div id="glazyr-header-actions">
+        <button id="glazyr-framed-shot" type="button" title="Viewport-only framed screenshot">Framed shot</button>
+        <button id="glazyr-close-widget" type="button" title="Close">×</button>
+      </div>
+    </div>
+
+    <div id="glazyr-capture-panel">
+      <div id="glazyr-capture-status"></div>
+    </div>
+
+    <div id="root"></div>
+
+    <!-- Load React UI once, then augment it with our glue code -->
+    <script src="popup.js"></script>
+    <script src="popup_actions.js"></script>
+  </body>
+</html>
+
+

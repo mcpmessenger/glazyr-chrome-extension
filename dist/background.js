@@ -4,6 +4,232 @@
   /** @type {Array<{url:string,title:string,text:string,timestamp:number}>} */
   const contextBuffer = []
 
+  // --- Runtime backend (Lambda Function URL) integration ---
+  const RUNTIME_BASE_URL_STORAGE = "glazyrRuntimeBaseUrl"
+  const RUNTIME_API_KEY_STORAGE = "glazyrRuntimeApiKey"
+  const DEVICE_ID_STORAGE = "glazyrDeviceId"
+
+  // Default to the provisioned runtime URL (can be overridden via chrome.storage.local).
+  const DEFAULT_RUNTIME_BASE_URL = "https://lxunoqp6dwzwfllsnnxxwsqqaq0vqnhp.lambda-url.us-east-1.on.aws"
+
+  /** @type {number|null} */
+  let lastActiveTabId = null
+
+  /** @type {Map<string, {deviceId:string,taskId:string,stepId:string,requestId:string,ts:number}>} */
+  const inflightRuntime = new Map()
+
+  function storageGet(keys) {
+    return new Promise((resolve) => chrome.storage.local.get(keys, (res) => resolve(res || {})))
+  }
+
+  async function ensureDeviceId() {
+    const res = await storageGet([DEVICE_ID_STORAGE])
+    const existing = String(res?.[DEVICE_ID_STORAGE] || "").trim()
+    if (existing) return existing
+    const id = crypto.randomUUID()
+    await chrome.storage.local.set({ [DEVICE_ID_STORAGE]: id })
+    return id
+  }
+
+  async function getRuntimeConfig() {
+    const deviceId = await ensureDeviceId()
+    const res = await storageGet([RUNTIME_BASE_URL_STORAGE, RUNTIME_API_KEY_STORAGE])
+    const baseUrl = String(res?.[RUNTIME_BASE_URL_STORAGE] || DEFAULT_RUNTIME_BASE_URL).replace(/\/+$/, "")
+    const apiKey = String(res?.[RUNTIME_API_KEY_STORAGE] || "")
+    return { baseUrl, apiKey, deviceId }
+  }
+
+  async function runtimeFetch(path, opts) {
+    const { baseUrl, apiKey } = await getRuntimeConfig()
+    const url = `${baseUrl}${path}`
+    const headers = { "content-type": "application/json" }
+    if (apiKey) headers["x-glazyr-api-key"] = apiKey
+
+    const res = await fetch(url, {
+      method: opts?.method || "GET",
+      headers,
+      body: opts?.body !== undefined ? JSON.stringify(opts.body) : undefined,
+    })
+
+    if (res.status === 204) return { status: 204, data: null }
+
+    const text = await res.text().catch(() => "")
+    let data = null
+    try {
+      data = text ? JSON.parse(text) : null
+    } catch {
+      data = text
+    }
+
+    if (!res.ok) {
+      const msg = typeof data?.error === "string" ? data.error : `Runtime request failed (${res.status})`
+      throw new Error(msg)
+    }
+
+    return { status: res.status, data }
+  }
+
+  async function startRuntimeTask(intent, ctx) {
+    const { deviceId } = await getRuntimeConfig()
+    const payload = {
+      deviceId,
+      intent: String(intent || "").trim(),
+      url: String(ctx?.url || ""),
+      title: String(ctx?.title || ""),
+    }
+    return await runtimeFetch("/runtime/task/start", { method: "POST", body: payload })
+  }
+
+  async function pollRuntimeOnce() {
+    if (!lastActiveTabId) return
+    const { deviceId } = await getRuntimeConfig()
+    const res = await runtimeFetch(`/runtime/next-action?deviceId=${encodeURIComponent(deviceId)}`)
+    if (res.status === 204 || !res.data) return
+
+    const msg = res.data
+    const requestId = String(msg.requestId || "")
+    const taskId = String(msg.taskId || "")
+    const stepId = String(msg.stepId || "")
+    const ts = Number(msg.ts || 0)
+    const action = msg.action || {}
+
+    if (!requestId || !taskId || !stepId || !ts) return
+
+    // Currently we support only click (MVP).
+    if (String(action.type || "").toLowerCase() !== "click") return
+
+    inflightRuntime.set(requestId, { deviceId, taskId, stepId, requestId, ts })
+
+    const selector = String(action.selector || "#mock-button")
+
+    chrome.tabs.sendMessage(
+      lastActiveTabId,
+      { type: "EXECUTE_ACTION", action: "click", selector, requestId, taskId, stepId, ts },
+      async (resp) => {
+        void chrome.runtime.lastError
+
+        // If the content script blocks locally, complete with failure immediately.
+        if (resp?.status === "blocked") {
+          try {
+            await runtimeFetch("/runtime/action-result", {
+              method: "POST",
+              body: { deviceId, taskId, stepId, requestId, ts, success: false, error: String(resp.error || "Blocked") },
+            })
+          } catch {}
+          inflightRuntime.delete(requestId)
+        }
+      }
+    )
+  }
+
+  // Poll the runtime while the extension is active.
+  setInterval(() => {
+    pollRuntimeOnce().catch(() => {})
+  }, 1500)
+
+  // --- Control-plane policy (best-effort enforcement) ---
+  const CONTROL_PLANE_CONFIG_KEY = "glazyrControlPlaneConfig"
+  const KILLSWITCH_KEY = "glazyrKillSwitch"
+
+  /** @type {{ killSwitchEngaged: boolean, agentMode: "observe"|"assist"|"automate", allowedDomains: string[], disallowedActions: string[] }} */
+  let policyCache = { killSwitchEngaged: false, agentMode: "observe", allowedDomains: [], disallowedActions: [] }
+
+  function normalizeDomain(input) {
+    const raw = String(input || "").trim().toLowerCase()
+    if (!raw) return ""
+    // Strip scheme if present.
+    const noScheme = raw.replace(/^[a-z]+:\/\//i, "")
+    // Strip path/query/hash.
+    const hostAndMaybePort = noScheme.split("/")[0]
+    // Strip port.
+    const host = hostAndMaybePort.split(":")[0]
+    return host
+  }
+
+  function hostMatchesPattern(host, pattern) {
+    const h = normalizeDomain(host)
+    const p = normalizeDomain(pattern)
+    if (!h || !p) return false
+    if (p === "*") return true
+    if (p.startsWith("*.")) {
+      const root = p.slice(2)
+      return h === root || h.endsWith("." + root)
+    }
+    // Allow subdomains if the root is provided (example.com matches foo.example.com).
+    return h === p || h.endsWith("." + p)
+  }
+
+  function urlAllowed(url, allowedDomains) {
+    const list = Array.isArray(allowedDomains) ? allowedDomains : []
+    if (!list.length) return true // no restriction configured
+    try {
+      const u = new URL(String(url || ""))
+      const host = u.hostname || ""
+      return list.some((d) => hostMatchesPattern(host, d))
+    } catch {
+      return false
+    }
+  }
+
+  function actionDisallowed(actionType, disallowedActions) {
+    const a = String(actionType || "").trim().toLowerCase()
+    const list = Array.isArray(disallowedActions) ? disallowedActions : []
+    return list.some((x) => String(x || "").trim().toLowerCase() === a)
+  }
+
+  async function refreshPolicyCache() {
+    return await new Promise((resolve) => {
+      chrome.storage.local.get([CONTROL_PLANE_CONFIG_KEY, KILLSWITCH_KEY], (res) => {
+        const cfg = res?.[CONTROL_PLANE_CONFIG_KEY]
+        const ks = res?.[KILLSWITCH_KEY]
+        const ksEngaged = !!(ks?.engaged || cfg?.killSwitchEngaged)
+        policyCache = {
+          killSwitchEngaged: ksEngaged,
+          agentMode: (cfg?.agentMode === "assist" || cfg?.agentMode === "automate" || cfg?.agentMode === "observe") ? cfg.agentMode : "observe",
+          allowedDomains: Array.isArray(cfg?.safety?.allowedDomains) ? cfg.safety.allowedDomains : [],
+          disallowedActions: Array.isArray(cfg?.safety?.disallowedActions) ? cfg.safety.disallowedActions : [],
+        }
+        resolve(policyCache)
+      })
+    })
+  }
+
+  // Keep a warm cache when the service worker is alive.
+  try {
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== "local") return
+      if (changes?.[CONTROL_PLANE_CONFIG_KEY] || changes?.[KILLSWITCH_KEY]) {
+        void refreshPolicyCache()
+      }
+    })
+  } catch {
+    // ignore
+  }
+
+  async function checkPolicyOrThrow(sender, actionType) {
+    await refreshPolicyCache()
+    const url = String(sender?.tab?.url || "")
+
+    if (!urlAllowed(url, policyCache.allowedDomains)) {
+      throw new Error("Blocked by policy: domain is not in allowed domains.")
+    }
+
+    if (policyCache.killSwitchEngaged) {
+      throw new Error("Blocked by policy: kill switch is engaged.")
+    }
+
+    // Observe mode is read-only: disallow actions that change state.
+    const act = String(actionType || "").toLowerCase()
+    const mutating = act === "click" || act === "type" || act === "navigate" || act === "submit"
+    if (policyCache.agentMode === "observe" && mutating) {
+      throw new Error("Blocked by policy: agent mode is Observe (read-only).")
+    }
+
+    if (actionDisallowed(act, policyCache.disallowedActions)) {
+      throw new Error(`Blocked by policy: action "${act}" is disallowed.`)
+    }
+  }
+
   function safeRuntimeSendMessage(msg) {
     try {
       chrome.runtime.sendMessage(msg, () => {
@@ -144,6 +370,12 @@
     return `Glazyr AI Mock: Received a framed screenshot (${source}). Ready for vision analysis.`
   }
 
+  async function analyzeImageWithRuntimeOcr(imageDataUrl) {
+    const res = await runtimeFetch("/runtime/vision/ocr", { method: "POST", body: { imageDataUrl } })
+    const text = String(res?.data?.text || "")
+    return text
+  }
+
   function requestRegionSelect(tabId) {
     chrome.tabs.sendMessage(tabId, { type: "BEGIN_REGION_SELECT" }, () => {
       const err = chrome.runtime.lastError
@@ -168,6 +400,7 @@
   }
 
   async function handleRegionSelected(sender, payload) {
+    await checkPolicyOrThrow(sender, "screenshot")
     const tabId = sender?.tab?.id
     const windowId = sender?.tab?.windowId
     if (!tabId || typeof windowId !== "number") throw new Error("No active tab/window for capture.")
@@ -198,8 +431,15 @@
 
     safeRuntimeSendMessage({ type: "CAPTURE_DONE", imageDataUrl: croppedDataUrl })
 
-    // Analyze (mock for now) and report back to popup and page
-    const analysisText = mockAnalyzeImage("crop_capture")
+    // Analyze (OCR via runtime) and report back to popup and page (fallback to mock).
+    let analysisText = ""
+    try {
+      const ocrText = await analyzeImageWithRuntimeOcr(croppedDataUrl)
+      const trimmed = String(ocrText || "").trim()
+      analysisText = trimmed ? `OCR:\n${trimmed.slice(0, 8000)}` : "OCR: No text detected."
+    } catch (e) {
+      analysisText = `OCR error: ${String(e?.message || e)}`
+    }
     await chrome.storage.local.set({
       lastCapture: { imageDataUrl: croppedDataUrl, analysisText, ts: Date.now() },
     })
@@ -254,6 +494,13 @@
 
     if (msg?.type === "USER_INPUT") {
       console.log("User input captured:", msg.details)
+      return true
+    }
+
+    // Allow in-page launcher button (content script) to toggle the widget.
+    if (msg?.type === "TOGGLE_WIDGET" && sender?.tab?.id) {
+      chrome.tabs.sendMessage(sender.tab.id, { type: "TOGGLE_WIDGET" }, () => void chrome.runtime.lastError)
+      sendResponse?.({ status: "ok" })
       return true
     }
 
@@ -333,32 +580,165 @@
 
     if (msg?.type === "USER_QUERY") {
       const query = String(msg.query || "")
-      const ctx = contextBuffer[0]
-      if (!ctx) {
-        sendResponse({ type: "AI_RESPONSE", text: "No page context available. Please navigate to a webpage first." })
+      const q = query.toLowerCase()
+
+      function normalizeQuery(input) {
+        return String(input || "")
+          .toLowerCase()
+          .replace(/[’']/g, "") // normalize apostrophes
+          .replace(/[^a-z0-9\s]/g, " ")
+          .replace(/\s+/g, " ")
+          .trim()
+      }
+
+      const nq = normalizeQuery(query)
+      const nqNoSpace = nq.replace(/\s+/g, "")
+
+      // Quick debug hook: ask "glazyr debug" to confirm the running background script has the latest logic.
+      if (nq === "glazyr debug") {
+        sendResponse({
+          type: "AI_RESPONSE",
+          text:
+            "Glazyr debug:\n" +
+            "- background: ocr-in-chat + page-about matcher v2\n" +
+            `- normalizedQuery: "${nq}"`,
+        })
         return true
       }
 
-      const q = query.toLowerCase()
+      // OCR doesn't require page context; allow it even on restricted pages if we have a last capture.
+      const wantsOcr =
+        q.includes("ocr") ||
+        q.includes("read the screenshot") ||
+        q.includes("text in the screenshot") ||
+        q.includes("text in this screenshot") ||
+        q.includes("what's the text") ||
+        q.includes("whats the text") ||
+        q.includes("what in the image") ||
+        q.includes("what's in the image") ||
+        q.includes("whats in the image") ||
+        q.includes("what is in the image") ||
+        q.includes("what's on the screenshot") ||
+        q.includes("whats on the screenshot") ||
+        q.includes("what's on this screenshot") ||
+        q.includes("whats on this screenshot") ||
+        q.includes("what's on this screen") ||
+        q.includes("whats on this screen")
+
+      if (wantsOcr) {
+        chrome.storage.local.get(["lastCapture"], (res) => {
+          const last = res?.lastCapture
+          const imageDataUrl = String(last?.imageDataUrl || "")
+          if (!imageDataUrl) {
+            sendResponse({ type: "AI_RESPONSE", text: "No capture found yet. Click “Framed shot” first." })
+            return
+          }
+          analyzeImageWithRuntimeOcr(imageDataUrl).then(
+            (text) => {
+              const trimmed = String(text || "").trim()
+              sendResponse({ type: "AI_RESPONSE", text: trimmed ? trimmed.slice(0, 8000) : "No text detected." })
+            },
+            (err) => sendResponse({ type: "AI_RESPONSE", text: String(err?.message || err) })
+          )
+        })
+        return true
+      }
+
+      const ctx = contextBuffer[0]
+      if (!ctx) {
+        // We can still be helpful without page context: use the last OCR/capture if present,
+        // and provide clear instructions for restoring context buffering.
+        chrome.storage.local.get(["lastCapture"], (res) => {
+          const last = res?.lastCapture
+          const analysisText = String(last?.analysisText || "").trim()
+
+          const guidance =
+            "I don’t have page context yet.\n\n" +
+            "To enable it:\n" +
+            "1) Switch to a normal website tab (not chrome://, edge://, about:, or the Web Store).\n" +
+            "2) Refresh the page once.\n" +
+            "3) Re-open the widget and ask again.\n\n" +
+            "Tip: You can still use “Framed shot” for OCR on any page you can capture."
+
+          if (analysisText) {
+            const raw = analysisText.replace(/^OCR:\s*/i, "").trim()
+            const looksLikeList =
+              raw.length > 0 &&
+              (raw.includes("WebControlPlane") ||
+                raw.includes("killSwitch") ||
+                raw.includes("ChromeExtension") ||
+                raw.includes("Runtime") ||
+                raw.split(/\s+/).length >= 8)
+
+            // If the user is asking a follow-up like "what's that about?", interpret the OCR text.
+            const isFollowup =
+              q.includes("what's that about") ||
+              q.includes("whats that about") ||
+              q === "what about that" ||
+              q.includes("what is that") ||
+              q.includes("whats that") ||
+              q.includes("what's this") ||
+              q.includes("whats this")
+
+            if (isFollowup && looksLikeList) {
+              sendResponse({
+                type: "AI_RESPONSE",
+                text:
+                  "Based on the last screenshot OCR, this looks like a high-level list of Glazyr components/modules " +
+                  "(dashboard UI, kill switch, web control plane APIs, extension heartbeat, runtime, safety enforcement, etc.).\n\n" +
+                  `OCR text snippet:\n${raw.slice(0, 500)}`,
+              })
+              return
+            }
+
+            // Otherwise, surface OCR + guidance.
+            sendResponse({
+              type: "AI_RESPONSE",
+              text: `I don’t have page context yet, but here’s what I extracted from the last screenshot:\n\n${raw.slice(0, 1200)}\n\n${guidance}`,
+            })
+            return
+          }
+
+          sendResponse({ type: "AI_RESPONSE", text: guidance })
+        })
+        return true
+      }
+
+      if (sender?.tab?.id) lastActiveTabId = sender.tab.id
+
       console.log(`AI Mock processing query: "${query}" on page: ${ctx.title}`)
 
       if (sender?.tab?.id && (q.includes("framed screenshot") || q.includes("crop capture") || q.includes("crop") || q.includes("frame"))) {
-        requestRegionSelect(sender.tab.id)
-        sendResponse({ type: "AI_RESPONSE", text: "Framed screenshot: drag to select an area, then release to capture." })
+        checkPolicyOrThrow(sender, "screenshot").then(
+          () => {
+            requestRegionSelect(sender.tab.id)
+            sendResponse({ type: "AI_RESPONSE", text: "Framed screenshot: drag to select an area, then release to capture." })
+          },
+          (err) => {
+            sendResponse({ type: "AI_RESPONSE", text: String(err?.message || err) })
+          }
+        )
         return true
       }
 
       if (q.includes("screenshot")) {
-        // Full viewport screenshot (not cropped)
-        chrome.tabs.captureVisibleTab({ format: "jpeg", quality: 90 }, (dataUrl) => {
-          const err = chrome.runtime.lastError
-          if (err) console.error("Error capturing screenshot:", err.message)
-          else console.log(`Screenshot captured. Data URL length: ${dataUrl?.length || 0}`)
-        })
-        sendResponse({
-          type: "AI_RESPONSE",
-          text: "Attempting to capture screenshot... (check extension console for status)",
-        })
+        checkPolicyOrThrow(sender, "screenshot").then(
+          () => {
+            // Full viewport screenshot (not cropped)
+            chrome.tabs.captureVisibleTab({ format: "jpeg", quality: 90 }, (dataUrl) => {
+              const err = chrome.runtime.lastError
+              if (err) console.error("Error capturing screenshot:", err.message)
+              else console.log(`Screenshot captured. Data URL length: ${dataUrl?.length || 0}`)
+            })
+            sendResponse({
+              type: "AI_RESPONSE",
+              text: "Attempting to capture screenshot... (check extension console for status)",
+            })
+          },
+          (err) => {
+            sendResponse({ type: "AI_RESPONSE", text: String(err?.message || err) })
+          }
+        )
         return true
       }
 
@@ -370,17 +750,58 @@
         return true
       }
 
-      if (q.includes("click")) {
-        const selector = "#mock-button"
-        if (sender?.tab?.id) {
-          chrome.tabs.sendMessage(sender.tab.id, { type: "EXECUTE_ACTION", action: "click", selector }, () => void chrome.runtime.lastError)
-        }
+      // Common "summary" phrasing that doesn't include the word "summary".
+      if (
+        nq.includes("whats this page about") ||
+        nq.includes("what is this page about") ||
+        nq.includes("whats this site about") ||
+        nq.includes("what is this site about") ||
+        nq.includes("whats this webpage about") ||
+        nq.includes("what is this webpage about") ||
+        nq.includes("whats this website about") ||
+        nq.includes("what is this website about") ||
+        nq.includes("page about") ||
+        // Handle missing spaces: "pageabout", "whatsthispageabout"
+        nqNoSpace.includes("pageabout") ||
+        nqNoSpace.includes("whatsthispageabout") ||
+        nqNoSpace.includes("whatisthispageabout")
+      ) {
+        const snippet = String(ctx.text || "").trim().slice(0, 280)
         sendResponse({
           type: "AI_RESPONSE",
-          text: `AI Action: I have instructed the content script to click the element with selector "${selector}".`,
+          text:
+            `This page (“${ctx.title}”) appears to be about:\n\n` +
+            (snippet ? `${snippet}${snippet.length >= 280 ? "…" : ""}\n\n` : "") +
+            `If you want a tighter summary, ask “give me a summary”.`,
         })
         return true
       }
+
+      if (q.includes("click")) {
+        const selector = "#mock-button"
+        checkPolicyOrThrow(sender, "click").then(
+          () => {
+            if (sender?.tab?.id) {
+              chrome.tabs.sendMessage(sender.tab.id, { type: "EXECUTE_ACTION", action: "click", selector }, () => void chrome.runtime.lastError)
+            }
+            sendResponse({
+              type: "AI_RESPONSE",
+              text: `AI Action: I have instructed the content script to click the element with selector "${selector}".`,
+            })
+          },
+          (err) => {
+            sendResponse({ type: "AI_RESPONSE", text: String(err?.message || err) })
+          }
+        )
+        return true
+      }
+
+      // Default path: send the query to the runtime orchestrator for planning/execution.
+      startRuntimeTask(query, ctx).then(
+        () => sendResponse({ type: "AI_RESPONSE", text: "Queued in runtime. Waiting for next action…" }),
+        (err) => sendResponse({ type: "AI_RESPONSE", text: String(err?.message || err) })
+      )
+      return true
 
       sendResponse({
         type: "AI_RESPONSE",
@@ -393,6 +814,23 @@
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg?.type === "ACTION_EXECUTED") {
       console.log(`Action executed successfully: ${msg.action} on selector ${msg.selector}`)
+      const requestId = String(msg.requestId || "")
+      const inflight = requestId ? inflightRuntime.get(requestId) : null
+      if (inflight) {
+        runtimeFetch("/runtime/action-result", {
+          method: "POST",
+          body: {
+            deviceId: inflight.deviceId,
+            taskId: inflight.taskId,
+            stepId: inflight.stepId,
+            requestId: inflight.requestId,
+            ts: inflight.ts,
+            success: true,
+            result: { action: msg.action, selector: msg.selector },
+          },
+        }).catch(() => {})
+        inflightRuntime.delete(requestId)
+      }
       sendResponse({ status: "ACK" })
       return true
     }
