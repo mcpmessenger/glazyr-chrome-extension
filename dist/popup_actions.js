@@ -143,7 +143,8 @@
         "Microphone permission was dismissed/denied.\n\n" +
         "Fix:\n" +
         "1) Click the mic again and choose Allow.\n" +
-        "2) If Chrome won't prompt anymore: open `chrome://settings/content/microphone` and allow `chrome-extension://" +
+        "2) If Chrome won't prompt anymore, open the Glazyr mic setup page to re-trigger the prompt.\n" +
+        "3) Or: open `chrome://settings/content/microphone` and allow `chrome-extension://" +
         id +
         "`.\n" +
         "3) Ensure the correct input device is selected in Microphone settings.\n"
@@ -232,6 +233,10 @@
               setStatus("STT error.")
               const errText = res?.error || "Could not start recording."
               setResult(helpForMicPermissionError(errText) || errText)
+              if (String(errText).toLowerCase().includes("permission")) {
+                const ok = confirm("Microphone permission is blocked. Open the Glazyr mic setup page to enable it?")
+                if (ok) chrome.tabs.create({ url: chrome.runtime.getURL("mic_setup.html") })
+              }
               return
             }
             recording = true

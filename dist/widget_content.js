@@ -102,6 +102,9 @@
 
     const frame = document.createElement("iframe")
     frame.src = chrome.runtime.getURL("popup.html")
+    // Allow microphone inside the iframe when the host page permits it.
+    // (Many sites block mic in iframes unless explicitly allowed.)
+    frame.allow = "microphone"
     frame.style.width = "100%"
     frame.style.height = "calc(100% - 38px)"
     frame.style.border = "1px solid rgba(255,255,255,0.10)"
