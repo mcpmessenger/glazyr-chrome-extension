@@ -39,8 +39,9 @@
       localRecorder.onstop = async () => {
         try {
           const blob = new Blob(chunks, { type: mimeType })
-          const audio = await blob.arrayBuffer()
-          resolve({ audio, mimeType: blob.type || mimeType })
+          const audioBuf = await blob.arrayBuffer()
+          const audioBytes = new Uint8Array(audioBuf)
+          resolve({ audioBytes, mimeType: blob.type || mimeType })
         } catch (e) {
           reject(e)
         }
@@ -75,7 +76,7 @@
     if (msg?.type === "OFFSCREEN_RECORD_STOP") {
       stopRecordingAndReturnAudio()
         .then((res) => {
-          chrome.runtime.sendMessage({ type: "OFFSCREEN_AUDIO_READY", audio: res.audio, mimeType: res.mimeType })
+          chrome.runtime.sendMessage({ type: "OFFSCREEN_AUDIO_READY", audioBytes: res.audioBytes, mimeType: res.mimeType })
           sendResponse?.({ ok: true })
         })
         .catch((e) => sendResponse?.({ ok: false, error: String(e?.message || e) }))

@@ -44,15 +44,24 @@
     return "audio/webm"
   }
 
-  async function transcribeWhisper({ audio, mimeType }) {
+  function coerceToUint8Array(data) {
+    if (!data) return null
+    if (data instanceof Uint8Array) return data
+    if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer)
+    if (data instanceof ArrayBuffer) return new Uint8Array(data)
+    return null
+  }
+
+  async function transcribeWhisper({ audioBytes, mimeType }) {
     const apiKey = await getOpenAIKey()
     if (!apiKey) throw new Error("OpenAI API key not set. Click the mic and enter your key.")
-    if (!audio) throw new Error("No audio provided.")
-    const bytes = audio?.byteLength ?? audio?.length ?? 0
+    const bytesArr = coerceToUint8Array(audioBytes)
+    if (!bytesArr) throw new Error("No audio bytes provided.")
+    const bytes = bytesArr.byteLength || 0
     if (bytes && bytes < 2048) throw new Error("Recorded audio was empty/too short. Try recording for 1–2 seconds.")
 
     const normalizedType = normalizeAudioMimeType(mimeType)
-    const blob = new Blob([audio], { type: normalizedType })
+    const blob = new Blob([bytesArr], { type: normalizedType })
     const form = new FormData()
     form.append("model", "whisper-1")
     form.append("file", blob, guessAudioFileName(normalizedType))
@@ -294,7 +303,7 @@
     }
 
     if (msg?.type === "OFFSCREEN_AUDIO_READY") {
-      transcribeWhisper({ audio: msg.audio, mimeType: msg.mimeType }).then(
+      transcribeWhisper({ audioBytes: msg.audioBytes, mimeType: msg.mimeType }).then(
         (text) => {
           safeRuntimeSendMessage({ type: "STT_RESULT", text })
         },
