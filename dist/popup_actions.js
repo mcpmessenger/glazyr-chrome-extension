@@ -1,9 +1,4 @@
 (() => {
-  function ensureContentScript(tabId, file, cb) {
-    if (!chrome?.scripting?.executeScript) return cb?.()
-    chrome.scripting.executeScript({ target: { tabId }, files: [file] }, () => cb?.())
-  }
-
   function ensureRegionSelectContentScript(tabId, cb) {
     // If the content script listener isn't present (common after updates),
     // inject the file and retry.
@@ -12,26 +7,6 @@
       { target: { tabId }, files: ["region_select_content.js"] },
       () => cb?.()
     )
-  }
-
-  function ensureWidgetContentScript(tabId, cb) {
-    ensureContentScript(tabId, "widget_content.js", cb)
-  }
-
-  function toggleWidget() {
-    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-      const tabId = tabs?.[0]?.id
-      if (!tabId) return
-      chrome.tabs.sendMessage(tabId, { type: "TOGGLE_WIDGET" }, () => {
-        const err = chrome.runtime.lastError
-        if (!err) return
-        ensureWidgetContentScript(tabId, () => {
-          chrome.tabs.sendMessage(tabId, { type: "TOGGLE_WIDGET" }, () => {
-            void chrome.runtime.lastError
-          })
-        })
-      })
-    })
   }
 
   function startFramedScreenshot() {
@@ -120,9 +95,6 @@
   function wire() {
     const btn = document.getElementById("glazyr-framed-shot")
     if (btn) btn.addEventListener("click", startFramedScreenshot)
-
-    const widgetBtn = document.getElementById("glazyr-open-widget")
-    if (widgetBtn) widgetBtn.addEventListener("click", toggleWidget)
 
     wireMessages()
     loadLastCapture()

@@ -240,4 +240,28 @@
       return true
     }
   })
+
+  // Make the extension icon open/close the in-page widget (no action popup).
+  chrome.action.onClicked.addListener((tab) => {
+    const tabId = tab?.id
+    if (!tabId) return
+
+    // First try: message the already-injected content script.
+    chrome.tabs.sendMessage(tabId, { type: "TOGGLE_WIDGET" }, () => {
+      const err = chrome.runtime.lastError
+      if (!err) return
+
+      // If no receiver (tab opened before update / content script not present), inject then retry.
+      if (chrome?.scripting?.executeScript) {
+        chrome.scripting.executeScript(
+          { target: { tabId }, files: ["widget_content.js"] },
+          () => {
+            chrome.tabs.sendMessage(tabId, { type: "TOGGLE_WIDGET" }, () => {
+              void chrome.runtime.lastError
+            })
+          }
+        )
+      }
+    })
+  })
 })()
