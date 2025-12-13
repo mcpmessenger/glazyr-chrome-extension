@@ -49,9 +49,17 @@
     return document.getElementById(id)
   }
 
+  function showCapturePanel(show) {
+    const p = el("glazyr-capture-panel")
+    if (!p) return
+    p.style.display = show ? "block" : "none"
+  }
+
   function setStatus(text) {
     const s = el("glazyr-capture-status")
     if (s) s.textContent = text
+    // Only show the panel when there's something to show.
+    if (text) showCapturePanel(true)
   }
 
   function isExpanded() {
@@ -67,12 +75,8 @@
     if (isExpanded()) return
     const s = el("glazyr-capture-status")
     if (!s) return
-    // Replace verbose tip with a compact default once the UI is loaded.
-    if (s.textContent && s.textContent.startsWith("Tip:")) {
-      s.textContent = "Ready."
-    }
-    // Also collapse "Done." into "Ready." to avoid wasting vertical space.
-    if (s.textContent === "Done.") s.textContent = "Ready."
+    // Hide panel entirely when there's nothing to show.
+    if (!s.textContent) showCapturePanel(false)
   }
 
   function setPreview(dataUrl) {
@@ -86,6 +90,7 @@
     }
     img.src = dataUrl
     img.style.display = "block"
+    showCapturePanel(true)
   }
 
   function setResult(text) {
@@ -99,6 +104,36 @@
     }
     r.textContent = text
     r.style.display = "block"
+    showCapturePanel(true)
+  }
+
+  function installCloseButton() {
+    const { form, sendBtn } = getInputAndForm()
+    if (!form || !sendBtn) return false
+    if (form.querySelector(".glazyr-close-btn")) return true
+
+    const btn = document.createElement("button")
+    btn.type = "button"
+    btn.className = "glazyr-close-btn"
+    btn.title = "Close widget"
+    btn.textContent = "×"
+
+    // Place at the far right of the bottom row (before Send).
+    try {
+      sendBtn.insertAdjacentElement("beforebegin", btn)
+    } catch {
+      form.appendChild(btn)
+    }
+
+    btn.addEventListener("click", () => {
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        const tabId = tabs?.[0]?.id
+        if (!tabId) return
+        chrome.tabs.sendMessage(tabId, { type: "TOGGLE_WIDGET" }, () => void chrome.runtime.lastError)
+      })
+    })
+
+    return true
   }
 
   function wireMessages() {
@@ -323,6 +358,7 @@
       const ensure = () => {
         try {
           installMicButton()
+          installCloseButton()
         } catch (e) {
           setStatus("Mic UI error.")
           setResult(String(e?.message || e))

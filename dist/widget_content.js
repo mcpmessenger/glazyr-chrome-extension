@@ -55,7 +55,6 @@
     bar.style.justifyContent = "space-between"
     bar.style.padding = "0 8px"
     bar.style.cursor = "move"
-    bar.title = "Drag to move. Resize from the bottom-right corner."
     bar.style.background = "rgba(11,15,20,0.96)"
     bar.style.border = "1px solid rgba(255,255,255,0.10)"
     bar.style.borderBottom = "0"
@@ -66,35 +65,11 @@
     bar.style.fontSize = "12px"
     bar.style.userSelect = "none"
 
-    const title = document.createElement("div")
-    title.textContent = "Glazyr"
-    title.style.fontWeight = "700"
-    title.style.letterSpacing = "0.2px"
-
-    const actions = document.createElement("div")
-    actions.style.display = "flex"
-    actions.style.alignItems = "center"
-    actions.style.gap = "8px"
-
-    const closeBtn = document.createElement("button")
-    closeBtn.type = "button"
-    closeBtn.textContent = "×"
-    closeBtn.title = "Close"
-    closeBtn.style.width = "24px"
-    closeBtn.style.height = "24px"
-    closeBtn.style.borderRadius = "10px"
-    closeBtn.style.border = "1px solid rgba(255,255,255,0.14)"
-    closeBtn.style.background = "rgba(255,255,255,0.06)"
-    closeBtn.style.color = "#e8f1ff"
-    closeBtn.style.cursor = "pointer"
-    closeBtn.addEventListener("click", () => {
-      removeWidget()
-    })
-
-    actions.appendChild(closeBtn)
-
-    bar.appendChild(title)
-    bar.appendChild(actions)
+    // Minimal drag bar: no title and no close button (close is provided inside the widget UI).
+    const spacer = document.createElement("div")
+    spacer.style.width = "1px"
+    spacer.style.height = "1px"
+    bar.appendChild(spacer)
 
     const frame = document.createElement("iframe")
     frame.src = chrome.runtime.getURL("popup.html")

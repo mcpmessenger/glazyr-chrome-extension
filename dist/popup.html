@@ -7,7 +7,7 @@
             flex-direction: column;
         }
         #glazyr-header {
-            height: 64px;
+            height: 52px;
             display: flex;
             align-items: center;
             justify-content: space-between;
@@ -25,8 +25,8 @@
             letter-spacing: 0.2px;
         }
         #glazyr-header img {
-            width: 40px;
-            height: 40px;
+            width: 32px;
+            height: 32px;
             border-radius: 10px;
         }
         #glazyr-framed-shot {
@@ -47,6 +47,7 @@
             gap: 8px;
         }
         #glazyr-capture-panel {
+            display: none;
             padding: 4px 10px;
             background: #0b0f14;
             border-bottom: 1px solid rgba(255,255,255,0.08);
@@ -100,9 +101,25 @@
             border-color: rgba(244,67,54,0.35);
             color: #c62828;
         }
+        .glazyr-close-btn {
+            margin-left: 8px;
+            width: 36px;
+            min-width: 36px;
+            height: 34px;
+            border-radius: 10px;
+            border: 1px solid rgba(0,0,0,0.12);
+            background: #ffffff;
+            color: #0b0f14;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            line-height: 1;
+        }
         #root {
             flex: 1;
             min-height: 0;
             display: flex;
             flex-direction: column;
-        }</style><script defer="defer" src="popup.js"></script></head><body><div id="glazyr-header"><div id="glazyr-header-left"><img src="logo.png" alt="Glazyr logo"><span>Glazyr</span></div><div id="glazyr-header-actions"><button id="glazyr-framed-shot" type="button" title="Viewport-only framed screenshot">Framed shot</button></div></div><div id="glazyr-capture-panel"><div id="glazyr-capture-status">Tip: Click <b>Framed shot</b> → drag to select → <b>release</b> to capture (Esc cancels).</div><img id="glazyr-capture-preview" alt="Cropped preview"><div id="glazyr-capture-result"></div></div><div id="root"></div><script src="popup.js"></script><script src="popup_actions.js"></script></body></html>
+        }</style><script defer="defer" src="popup.js"></script></head><body><div id="glazyr-header"><div id="glazyr-header-left"><img src="logo.png" alt="Glazyr logo"></div><div id="glazyr-header-actions"><button id="glazyr-framed-shot" type="button" title="Viewport-only framed screenshot">Framed shot</button></div></div><div id="glazyr-capture-panel"><div id="glazyr-capture-status"></div><img id="glazyr-capture-preview" alt="Cropped preview"><div id="glazyr-capture-result"></div></div><div id="root"></div><script src="popup.js"></script><script src="popup_actions.js"></script></body></html>
