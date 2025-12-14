@@ -5,6 +5,7 @@
   "description": "Vision-first AI assistant for web browsing.",
   "homepage_url": "https://github.com/mcpmessenger/glazyr-chrome-extension",
   "privacy_policy": "https://github.com/mcpmessenger/glazyr-chrome-extension/blob/main/PRIVACY.md",
+  "options_page": "popup.html",
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
