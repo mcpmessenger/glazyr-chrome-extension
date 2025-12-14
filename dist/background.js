@@ -525,19 +525,51 @@
     form.append("model", "whisper-1")
     form.append("file", blob, guessAudioFileName(normalizedType))
 
-    const resp = await fetch("https://api.openai.com/v1/audio/transcriptions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: form,
-    })
+    console.log("Starting Whisper transcription, audio size:", bytes, "bytes, mimeType:", normalizedType)
 
-    const text = await resp.text()
-    if (!resp.ok) throw new Error(`Whisper STT failed (${resp.status}): ${text}`)
+    // Add timeout to prevent hanging
+    const timeoutMs = 60000 // 60 seconds
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => {
+      controller.abort()
+    }, timeoutMs)
 
-    const json = JSON.parse(text)
-    return String(json?.text || "")
+    try {
+      const resp = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: form,
+        signal: controller.signal,
+      })
+
+      clearTimeout(timeoutId)
+
+      console.log("Whisper API response status:", resp.status, resp.statusText)
+
+      const text = await resp.text()
+      if (!resp.ok) {
+        console.error("Whisper API error response:", text)
+        throw new Error(`Whisper STT failed (${resp.status}): ${text}`)
+      }
+
+      const json = JSON.parse(text)
+      const transcript = String(json?.text || "")
+      console.log("Whisper transcription successful, length:", transcript.length)
+      return transcript
+    } catch (err) {
+      clearTimeout(timeoutId)
+      if (err.name === "AbortError") {
+        console.error("Whisper transcription timed out after", timeoutMs, "ms")
+        throw new Error(`Transcription timed out after ${timeoutMs / 1000} seconds. Please try again.`)
+      }
+      if (err.message) {
+        throw err
+      }
+      console.error("Whisper transcription error:", err)
+      throw new Error(`Transcription failed: ${String(err)}`)
+    }
   }
 
   async function ensureOffscreenDocument() {
@@ -1206,18 +1238,29 @@
           safeRuntimeSendMessage({ type: "STT_STATUS", text: "Requesting microphone…" })
           chrome.runtime.sendMessage({ type: "OFFSCREEN_RECORD_START" }, (res) => {
             if (chrome.runtime.lastError) {
-              sendResponse({ ok: false, error: chrome.runtime.lastError.message })
+              const errorMsg = chrome.runtime.lastError.message
+              console.error("STT_RECORD_START error:", errorMsg)
+              safeRuntimeSendMessage({ type: "STT_ERROR", text: errorMsg })
+              sendResponse({ ok: false, error: errorMsg })
               return
             }
             if (!res?.ok) {
-              sendResponse({ ok: false, error: res?.error || "Failed to start recording." })
+              const errorMsg = res?.error || "Failed to start recording."
+              console.error("STT_RECORD_START failed:", errorMsg)
+              safeRuntimeSendMessage({ type: "STT_ERROR", text: errorMsg })
+              sendResponse({ ok: false, error: errorMsg })
               return
             }
             safeRuntimeSendMessage({ type: "STT_STATUS", text: "Recording… click mic to stop." })
             sendResponse({ ok: true })
           })
         })
-        .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }))
+        .catch((e) => {
+          const errorMsg = String(e?.message || e)
+          console.error("STT_RECORD_START exception:", errorMsg, e)
+          safeRuntimeSendMessage({ type: "STT_ERROR", text: errorMsg })
+          sendResponse({ ok: false, error: errorMsg })
+        })
       return true
     }
 
@@ -1227,32 +1270,106 @@
           safeRuntimeSendMessage({ type: "STT_STATUS", text: "Stopping…" })
           chrome.runtime.sendMessage({ type: "OFFSCREEN_RECORD_STOP" }, (res) => {
             if (chrome.runtime.lastError) {
-              sendResponse({ ok: false, error: chrome.runtime.lastError.message })
+              const errorMsg = chrome.runtime.lastError.message
+              console.error("STT_RECORD_STOP error:", errorMsg)
+              safeRuntimeSendMessage({ type: "STT_ERROR", text: errorMsg })
+              sendResponse({ ok: false, error: errorMsg })
               return
             }
             if (!res?.ok) {
-              sendResponse({ ok: false, error: res?.error || "Failed to stop recording." })
+              const errorMsg = res?.error || "Failed to stop recording."
+              console.error("STT_RECORD_STOP failed:", errorMsg)
+              safeRuntimeSendMessage({ type: "STT_ERROR", text: errorMsg })
+              sendResponse({ ok: false, error: errorMsg })
               return
             }
             safeRuntimeSendMessage({ type: "STT_STATUS", text: "Transcribing…" })
             sendResponse({ ok: true })
           })
         })
-        .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }))
+        .catch((e) => {
+          const errorMsg = String(e?.message || e)
+          console.error("STT_RECORD_STOP exception:", errorMsg, e)
+          safeRuntimeSendMessage({ type: "STT_ERROR", text: errorMsg })
+          sendResponse({ ok: false, error: errorMsg })
+        })
       return true
     }
 
     if (msg?.type === "OFFSCREEN_AUDIO_READY") {
       // Back-compat: older offscreen recorders sent `audio` (ArrayBuffer) instead of `audioBytes` (Uint8Array)
       const audioPayload = msg.audioBytes ?? msg.audio
-      transcribeWhisper({ audioBytes: audioPayload, mimeType: msg.mimeType }).then(
-        (text) => {
-          safeRuntimeSendMessage({ type: "STT_RESULT", text })
-        },
-        (err) => {
-          safeRuntimeSendMessage({ type: "STT_ERROR", text: String(err?.message || err) })
+      
+      // Validate audio payload before transcription
+      if (!audioPayload) {
+        const errorMsg = "No audio data received from recorder. Please try recording again."
+        console.error("OFFSCREEN_AUDIO_READY: No audio payload", msg)
+        safeRuntimeSendMessage({ type: "STT_ERROR", text: errorMsg })
+        sendResponse?.({ ok: false, error: errorMsg })
+        return true
+      }
+      
+      // When passed through chrome.runtime.sendMessage, Uint8Array gets serialized to a plain object
+      // We need to reconstruct it. Check if it's already a typed array or needs conversion
+      let audioBytes = audioPayload
+      let audioSize = 0
+      
+      if (audioPayload instanceof Uint8Array) {
+        audioSize = audioPayload.length
+        audioBytes = audioPayload
+      } else if (audioPayload instanceof ArrayBuffer) {
+        audioSize = audioPayload.byteLength
+        audioBytes = new Uint8Array(audioPayload)
+      } else if (ArrayBuffer.isView(audioPayload)) {
+        audioSize = audioPayload.byteLength || audioPayload.length
+        audioBytes = new Uint8Array(audioPayload.buffer || audioPayload)
+      } else {
+        // It's been serialized - reconstruct from object
+        // Check if it has numeric keys (serialized array)
+        const keys = Object.keys(audioPayload).filter(k => !isNaN(parseInt(k)))
+        audioSize = keys.length
+        
+        if (audioSize > 0) {
+          // Reconstruct Uint8Array from serialized object
+          const arr = new Uint8Array(audioSize)
+          for (let i = 0; i < audioSize; i++) {
+            arr[i] = audioPayload[i] || 0
+          }
+          audioBytes = arr
+          console.log("OFFSCREEN_AUDIO_READY: Reconstructed Uint8Array from serialized object, size:", audioSize)
         }
-      )
+      }
+      
+      console.log("OFFSCREEN_AUDIO_READY: Audio payload type:", audioPayload.constructor?.name || typeof audioPayload, "size:", audioSize, "bytes")
+      
+      if (audioSize === 0) {
+        const errorMsg = "Recorded audio was empty. Please record for at least 1-2 seconds and try again."
+        console.error("OFFSCREEN_AUDIO_READY: Empty audio payload", audioPayload)
+        safeRuntimeSendMessage({ type: "STT_ERROR", text: errorMsg })
+        sendResponse?.({ ok: false, error: errorMsg })
+        return true
+      }
+      
+      console.log("Starting transcription, audio size:", audioSize, "bytes, mimeType:", msg.mimeType)
+      
+      transcribeWhisper({ audioBytes: audioBytes, mimeType: msg.mimeType })
+        .then(
+          (text) => {
+            console.log("Transcription completed successfully")
+            safeRuntimeSendMessage({ type: "STT_RESULT", text })
+          },
+          (err) => {
+            const errorMsg = String(err?.message || err)
+            console.error("STT transcription error:", errorMsg, err)
+            safeRuntimeSendMessage({ type: "STT_ERROR", text: errorMsg })
+          }
+        )
+        .catch((err) => {
+          // Catch any unexpected errors
+          const errorMsg = String(err?.message || err || "Unexpected transcription error")
+          console.error("STT transcription unexpected error:", errorMsg, err)
+          safeRuntimeSendMessage({ type: "STT_ERROR", text: errorMsg })
+        })
       sendResponse?.({ ok: true })
       return true
     }

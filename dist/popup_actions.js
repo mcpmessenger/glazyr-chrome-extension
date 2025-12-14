@@ -467,19 +467,48 @@
       } else if (msg.type === "STT_STATUS") {
         if (msg.text) setStatus(msg.text)
       } else if (msg.type === "STT_ERROR") {
-        setStatus("STT error.")
-        setResult(msg.text || "Unknown STT error")
+        const errorText = msg.text || "Unknown STT error"
+        setStatus(`STT error: ${errorText}`)
+        setResult(errorText)
+        console.error("STT Error:", errorText)
       } else if (msg.type === "STT_RESULT") {
         const text = String(msg.text || "").trim()
         if (!text) {
           setStatus("No speech detected.")
           return
         }
-        setStatus("STT inserted. Edit if needed, then Send.")
-        const { input } = getInputAndForm()
+        setStatus("STT inserted. Ready to send.")
+        const { input, form, sendBtn } = getInputAndForm()
         if (input) {
           setReactInputValue(input, text)
-          input.focus()
+          
+          // Ensure Send button is enabled - try multiple approaches
+          setTimeout(() => {
+            // Verify the value was set
+            if (input.value !== text) {
+              // Try setting it again
+              setReactInputValue(input, text)
+            }
+            
+            // Trigger additional events to ensure React recognizes the change
+            const events = ["input", "change", "keyup", "keydown"]
+            events.forEach(eventType => {
+              const evt = new Event(eventType, { bubbles: true, cancelable: true })
+              Object.defineProperty(evt, "target", { value: input, enumerable: true })
+              input.dispatchEvent(evt)
+            })
+            
+            // If Send button is still disabled, try to enable it directly
+            if (sendBtn && sendBtn.disabled && input.value.trim()) {
+              // Remove disabled attribute (React might re-add it, but worth trying)
+              sendBtn.removeAttribute("disabled")
+              // Try clicking programmatically to see if that helps React recognize state
+              // (We won't actually submit, just trigger the click handler if it checks state)
+            }
+            
+            // Focus the input to ensure it's ready
+            input.focus()
+          }, 150)
         } else {
           setResult(text)
         }
@@ -616,8 +645,40 @@
   }
 
   function setReactInputValue(input, value) {
-    input.value = value
-    input.dispatchEvent(new Event("input", { bubbles: true }))
+    // Simulate user interaction: focus first
+    input.focus()
+    const focusEvent = new Event("focus", { bubbles: true, cancelable: true })
+    input.dispatchEvent(focusEvent)
+    
+    // Use native value setter to bypass React's restrictions
+    const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set
+    if (nativeInputValueSetter) {
+      nativeInputValueSetter.call(input, value)
+    } else {
+      input.value = value
+    }
+    
+    // Create and dispatch a proper input event that React will recognize
+    const inputEvent = new Event("input", { bubbles: true, cancelable: true })
+    Object.defineProperty(inputEvent, "target", { value: input, enumerable: true })
+    Object.defineProperty(inputEvent, "currentTarget", { value: input, enumerable: true })
+    input.dispatchEvent(inputEvent)
+    
+    // Also dispatch change event
+    const changeEvent = new Event("change", { bubbles: true, cancelable: true })
+    Object.defineProperty(changeEvent, "target", { value: input, enumerable: true })
+    Object.defineProperty(changeEvent, "currentTarget", { value: input, enumerable: true })
+    input.dispatchEvent(changeEvent)
+    
+    // Trigger keyboard events to simulate typing
+    const keydownEvent = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "a" })
+    input.dispatchEvent(keydownEvent)
+    
+    const keyupEvent = new KeyboardEvent("keyup", { bubbles: true, cancelable: true, key: "a" })
+    input.dispatchEvent(keyupEvent)
+    
+    // Keep focus on the input
+    input.focus()
   }
 
   function getOpenAIKey(cb) {
@@ -779,6 +840,29 @@
       setResult(String(e?.message || e))
     }
   }
+
+  // Listen for messages from parent window (drag bar buttons)
+  // The parent is a content script, so it may have a different origin (the page's origin)
+  // We accept messages with our expected structure from any origin since we control the parent
+  window.addEventListener("message", (event) => {
+    // Only process messages with our expected structure
+    if (!event.data || typeof event.data !== "object" || !event.data.type) {
+      return
+    }
+    
+    if (event.data.type === "FRAMED_SHOT_CLICK") {
+      startFramedScreenshot()
+    } else if (event.data.type === "FULLPAGE_SHOT_CLICK") {
+      startFullPageScreenshot()
+    } else if (event.data.type === "CLOSE_WIDGET_CLICK") {
+      try {
+        if (!chrome?.runtime?.id) return
+        chrome.runtime.sendMessage({ type: "TOGGLE_WIDGET" }, () => void chrome.runtime.lastError)
+      } catch {
+        // ignore
+      }
+    }
+  })
 
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", wire)

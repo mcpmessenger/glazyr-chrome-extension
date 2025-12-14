@@ -54,8 +54,9 @@ The Glazyr Chrome Extension follows a **local-first, dual-runtime architecture**
 
 **Extension Components:**
 - **Content Scripts**: Injected into web pages to capture context (URL, title, text) and execute actions. Includes widget injection and page interaction capabilities.
-- **Service Worker**: Central orchestrator that enforces safety policies, manages API communication, and coordinates between components.
-- **Widget UI**: User-facing interface (popup/widget) that displays chat, shows splash video animations during loading, and handles user input.
+- **Service Worker**: Central orchestrator that enforces safety policies, manages API communication, and coordinates between components. Handles STT transcription via OpenAI Whisper API.
+- **Widget UI**: User-facing interface (popup/widget) that displays chat, shows splash video animations during loading, and handles user input including voice transcription.
+- **Offscreen Document**: Used for audio recording to avoid site permission restrictions. Records microphone audio for STT transcription.
 
 **External Runtimes:**
 - **Vision Runtime (AWS)**: Handles OCR and image analysis. Receives screenshots only when explicitly captured by the user.
@@ -91,8 +92,9 @@ This extension requests:
 
 - **`<all_urls>` host permission**: so content scripts can run on pages you visit.
 - **`activeTab`, `scripting`**: to interact with the current page when you invoke the extension.
-- **`storage`**: to persist settings/state.
+- **`storage`**: to persist settings/state (including OpenAI API key for STT).
 - **`tabs`, `webNavigation`**: to read basic tab/navigation context needed for the browsing assistant.
+- **`offscreen`**: to record audio in an offscreen document for STT transcription (avoids site permission restrictions).
 
 See `dist/manifest.json` for the authoritative list.
 
@@ -167,11 +169,13 @@ Runtime endpoint/auth can be configured via `chrome.storage.local` or via chat c
 
 ### Widget UX (current POC)
 
+- **Navigation bar** at the top contains the Glazyr logo and action buttons (Framed shot, Full page, Close).
 - OCR prints into the **chat** (assistant message), not a dedicated OCR panel.
 - The widget does **not** render the screenshot image (it's already visible on the page).
 - A draggable **in-page Glazyr logo launcher** toggles the widget.
 - **Splash video animation** plays in the header while waiting for page context to load (mobile/desktop variants).
 - **Extension icon badge** shows hourglass (⏳) during page context loading.
+- **Voice input** via microphone button (🎙) next to the input field for hands-free query entry.
 
 ## How to use Glazyr
 
@@ -191,15 +195,52 @@ Runtime endpoint/auth can be configured via `chrome.storage.local` or via chat c
 
 1. Open any webpage.
 2. Click the in-page **Glazyr logo launcher** to open the widget (or click the extension icon).
-3. Click **Framed shot**.
+3. Click **Framed shot** in the nav bar.
 4. Select an area, release to capture.
 
 Alternative (via text query in the popup): type **"framed screenshot"** (or **"crop capture"**) and submit.
+
+### Voice Input (Speech-to-Text)
+
+Glazyr supports voice input using OpenAI's Whisper API for speech transcription:
+
+1. Open the widget.
+2. Click the **microphone button** (🎙) next to the input field.
+3. Grant microphone permission when prompted (first time only).
+4. Enter your OpenAI API key when prompted (stored locally, only sent to OpenAI).
+5. Speak clearly for 1-2 seconds or longer.
+6. Click the microphone button again to stop recording.
+7. The transcribed text will automatically appear in the input field, ready to send.
+
+**Requirements:**
+- Microphone access (granted when you first use the feature)
+- OpenAI API key (enter when prompted, or get one from https://platform.openai.com/api-keys)
+- Internet connection (for transcription API calls)
+
+**Features:**
+- Records audio in an offscreen document to avoid site permission restrictions
+- Automatically inserts transcribed text into the input field
+- Send button is enabled immediately after transcription
+- Audio is only sent to OpenAI's Whisper API (stored locally until transcription)
+
+**Note:** The microphone button appears next to the input field in the widget. If you don't see it, try closing and reopening the widget.
 
 ## Runtime requirements for OCR
 
 - Provision the AWS runtime: see `../runtime-aws/README.md`
 - Enable **billing** on the GCP project and enable the **Cloud Vision API**
+
+## Troubleshooting
+
+### Speech-to-Text (STT) Issues
+
+If you're experiencing issues with the microphone/voice input feature, see the [STT Troubleshooting Guide](STT_TROUBLESHOOTING.md) for detailed solutions to common problems including:
+
+- Microphone permission issues
+- OpenAI API key setup
+- Audio recording problems
+- API errors and rate limits
+- Debugging steps
 
 ## Update the extension logo (icons)
 

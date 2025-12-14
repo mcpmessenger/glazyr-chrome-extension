@@ -3,6 +3,7 @@
   let recorder = null
   let chunks = []
   let mimeType = "audio/webm"
+  let recordingStartTime = null
 
   const stitchSessions = new Map()
 
@@ -102,31 +103,70 @@
     stream = await navigator.mediaDevices.getUserMedia({ audio: true })
     recorder = new MediaRecorder(stream, { mimeType })
     chunks = []
+    recordingStartTime = Date.now()
 
     recorder.ondataavailable = (e) => {
-      if (e.data && e.data.size > 0) chunks.push(e.data)
+      if (e.data && e.data.size > 0) {
+        chunks.push(e.data)
+        console.log("Audio chunk received:", e.data.size, "bytes, total chunks:", chunks.length)
+      }
     }
 
     // Use a timeslice so we reliably get data chunks even for short recordings.
     recorder.start(250)
+    console.log("Recording started, mimeType:", mimeType)
   }
 
   async function stopRecordingAndReturnAudio() {
     if (!recorder) throw new Error("Not recording.")
 
+    // Check recording duration
+    const recordingDuration = recordingStartTime ? Date.now() - recordingStartTime : 0
+    if (recordingDuration < 500) {
+      console.warn("Recording stopped too quickly:", recordingDuration, "ms")
+    }
+
     const localRecorder = recorder
     const localStream = stream
+    const localChunks = [...chunks] // Copy chunks before clearing
     recorder = null
     stream = null
+    recordingStartTime = null
 
     const result = await new Promise((resolve, reject) => {
       localRecorder.onstop = async () => {
         try {
-          const blob = new Blob(chunks, { type: mimeType })
+          console.log("Recording stopped, chunks:", localChunks.length, "total size:", localChunks.reduce((sum, c) => sum + (c.size || 0), 0), "bytes")
+          
+          // Check if we have any chunks
+          if (!localChunks || localChunks.length === 0) {
+            reject(new Error("No audio data recorded. Please record for at least 1-2 seconds."))
+            return
+          }
+
+          const blob = new Blob(localChunks, { type: mimeType })
+          
+          // Check if blob is empty
+          if (!blob || blob.size === 0) {
+            reject(new Error("Recorded audio was empty. Please try recording again."))
+            return
+          }
+
+          console.log("Audio blob created:", blob.size, "bytes, type:", blob.type)
+
           const audioBuf = await blob.arrayBuffer()
+          
+          // Check if arrayBuffer is empty
+          if (!audioBuf || audioBuf.byteLength === 0) {
+            reject(new Error("No audio bytes captured. Please try recording again."))
+            return
+          }
+
           const audioBytes = new Uint8Array(audioBuf)
+          console.log("Audio bytes ready:", audioBytes.length, "bytes")
           resolve({ audioBytes, mimeType: blob.type || mimeType })
         } catch (e) {
+          console.error("Error processing audio:", e)
           reject(e)
         }
       }
