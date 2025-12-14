@@ -28,6 +28,16 @@
     )
   }
 
+  function ensureFullPageCaptureContentScript(tabId, cb) {
+    // If the content script listener isn't present (common after updates),
+    // inject the file and retry.
+    if (!chrome?.scripting?.executeScript) return cb?.()
+    chrome.scripting.executeScript(
+      { target: { tabId }, files: ["fullpage_capture_content.js"] },
+      () => cb?.()
+    )
+  }
+
   function startFramedScreenshot() {
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       const tabId = tabs?.[0]?.id
@@ -44,6 +54,29 @@
         // Retry after injecting the selection script
         ensureRegionSelectContentScript(tabId, () => {
           chrome.tabs.sendMessage(tabId, { type: "BEGIN_REGION_SELECT" }, () => {
+            void chrome.runtime.lastError
+          })
+        })
+      })
+    })
+  }
+
+  function startFullPageScreenshot() {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      const tabId = tabs?.[0]?.id
+      if (!tabId) return
+      const url = tabs?.[0]?.url
+      if (isRestrictedUrl(url)) {
+        setStatus("Can’t capture on chrome:// or other restricted pages. Open a normal website tab.")
+        return
+      }
+      setStatus("Capturing full page… (scrolling the page briefly)")
+      chrome.tabs.sendMessage(tabId, { type: "BEGIN_FULLPAGE_CAPTURE" }, () => {
+        const err = chrome.runtime.lastError
+        if (!err) return
+        // Retry after injecting the full-page capture script
+        ensureFullPageCaptureContentScript(tabId, () => {
+          chrome.tabs.sendMessage(tabId, { type: "BEGIN_FULLPAGE_CAPTURE" }, () => {
             void chrome.runtime.lastError
           })
         })
@@ -239,6 +272,44 @@
     if (text) showCapturePanel(true)
   }
 
+  function flashLogo(start) {
+    const img = document.querySelector("#glazyr-header img")
+    const mobileVideo = document.querySelector("#glazyr-header video.mobile-logo")
+    const desktopVideo = document.querySelector("#glazyr-header video.desktop-logo")
+    
+    if (start) {
+      // Hide static image
+      if (img) img.classList.add("flashing")
+      
+      // Determine which video to show based on screen width
+      const isMobile = window.innerWidth < 600
+      const activeVideo = isMobile ? mobileVideo : desktopVideo
+      
+      if (activeVideo) {
+        activeVideo.classList.add("flashing")
+        activeVideo.currentTime = 0 // Reset to start
+        activeVideo.play().catch((err) => {
+          console.log("Video play error:", err)
+        })
+      }
+    } else {
+      // Show static image
+      if (img) img.classList.remove("flashing")
+      
+      // Hide and pause all videos
+      if (mobileVideo) {
+        mobileVideo.classList.remove("flashing")
+        mobileVideo.pause()
+        mobileVideo.currentTime = 0
+      }
+      if (desktopVideo) {
+        desktopVideo.classList.remove("flashing")
+        desktopVideo.pause()
+        desktopVideo.currentTime = 0
+      }
+    }
+  }
+
   function isExpanded() {
     const res = el("glazyr-capture-result")
     const resVisible = res && res.style.display !== "none" && !!res.textContent
@@ -273,6 +344,98 @@
     showCapturePanel(true)
   }
 
+  function normalizeWhitespace(s) {
+    return String(s || "")
+      .replace(/\s+/g, " ")
+      .trim()
+  }
+
+  function parseVisionAnalysisText(raw) {
+    const s = String(raw || "").trim()
+    if (!s) return { raw: "", caption: "", labels: "", objects: "", text: "" }
+
+    const lines = s.split(/\r?\n/)
+    let caption = ""
+    let labels = ""
+    let objects = ""
+    let collectingText = false
+    const textLines = []
+
+    for (const line of lines) {
+      const t = String(line || "").trim()
+      const lower = t.toLowerCase()
+
+      if (lower.startsWith("caption:")) {
+        caption = t.slice("caption:".length).trim()
+        collectingText = false
+        continue
+      }
+      if (lower.startsWith("labels:")) {
+        labels = t.slice("labels:".length).trim()
+        collectingText = false
+        continue
+      }
+      if (lower.startsWith("objects:")) {
+        objects = t.slice("objects:".length).trim()
+        collectingText = false
+        continue
+      }
+      if (lower.startsWith("text:")) {
+        collectingText = true
+        const after = t.slice("text:".length).trim()
+        if (after) textLines.push(after)
+        continue
+      }
+
+      if (collectingText) {
+        // Don't accidentally slurp metadata from our OCR-only fallback format.
+        if (lower.startsWith("note:") || lower.startsWith("tried:") || lower.startsWith("details:")) {
+          collectingText = false
+          continue
+        }
+        textLines.push(line)
+      }
+    }
+
+    const text = textLines.join("\n").trim()
+    return { raw: s, caption, labels, objects, text }
+  }
+
+  function formatVisionAnalysisForUser(raw) {
+    const p = parseVisionAnalysisText(raw)
+
+    // If this isn't the structured vision string, fall back to a short quote.
+    const looksStructured = !!(p.caption || p.labels || p.objects || p.text)
+    if (!looksStructured) {
+      const compact = normalizeWhitespace(p.raw)
+      const q = compact.length > 240 ? compact.slice(0, 240) + "…" : compact
+      return `Quoted text: "${q}"`
+    }
+
+    const quoteSource = p.text ? normalizeWhitespace(p.text) : normalizeWhitespace(p.caption)
+    const quoted = quoteSource
+      ? quoteSource.length > 240
+        ? quoteSource.slice(0, 240) + "…"
+        : quoteSource
+      : "(none detected)"
+
+    let summary = ""
+    if (p.caption) {
+      summary = String(p.caption || "").trim()
+    } else if (p.text) {
+      // If we don't have a caption, fall back to a short "gist" from the text itself.
+      const compact = normalizeWhitespace(p.text)
+      const m = compact.match(/^[\s\S]{1,600}?[.?!](\s|$)/)
+      const firstSentence = (m ? m[0] : compact).trim()
+      summary = firstSentence.length > 240 ? firstSentence.slice(0, 240) + "…" : firstSentence
+    }
+
+    summary = String(summary || "").trim()
+    if (summary.length > 900) summary = summary.slice(0, 900) + "…"
+
+    return `Quoted text: "${quoted}"\nSummary: ${summary || "(no summary)"}`
+  }
+
   function wireMessages() {
     chrome.runtime.onMessage.addListener((msg) => {
       if (!msg?.type) return
@@ -290,8 +453,9 @@
         if (msg.imageDataUrl) setPreview(msg.imageDataUrl)
         // Prefer printing OCR into chat instead of dedicating panel space.
         if (msg.text) {
-          const ok = appendAssistantMessageToChat(msg.text)
-          if (!ok) setResult(msg.text)
+          const shown = formatVisionAnalysisForUser(msg.text)
+          const ok = appendAssistantMessageToChat(shown)
+          if (!ok) setResult(shown)
           else setResult("")
         }
         autoCondenseStatus()
@@ -320,6 +484,27 @@
           setResult(text)
         }
         autoCondenseStatus()
+      } else if (msg.type === "RUNTIME_TASK_STATUS") {
+        const status = String(msg.status || "").trim()
+        const taskId = String(msg.taskId || "").trim()
+        const summary = String(msg.summary || "").trim()
+
+        if (status) {
+          setStatus(taskId ? `Runtime: ${status} (${taskId.slice(0, 8)}…)` : `Runtime: ${status}`)
+        } else if (taskId) {
+          setStatus(`Runtime: ${taskId.slice(0, 8)}…`)
+        }
+
+        // If the runtime provides a short summary/output, show it as an assistant bubble.
+        if (summary) {
+          appendAssistantMessageToChat(`Runtime update:\n${summary.slice(0, 1600)}`)
+        }
+      } else if (msg.type === "PAGE_CONTEXT_LOADING") {
+        // Flash the logo when waiting for page context to load
+        flashLogo(true)
+      } else if (msg.type === "PAGE_CONTEXT_LOADED") {
+        // Stop flashing when page context is loaded
+        flashLogo(false)
       }
     })
   }
@@ -548,6 +733,9 @@
   function wire() {
     const btn = document.getElementById("glazyr-framed-shot")
     if (btn) btn.addEventListener("click", startFramedScreenshot)
+
+    const fullBtn = document.getElementById("glazyr-fullpage-shot")
+    if (fullBtn) fullBtn.addEventListener("click", startFullPageScreenshot)
 
     const closeBtn = document.getElementById("glazyr-close-widget")
     if (closeBtn) {

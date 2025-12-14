@@ -3,6 +3,8 @@
   "name": "Glazyr Chrome Extension",
   "version": "1.0.21",
   "description": "Vision-first AI assistant for web browsing.",
+  "homepage_url": "https://github.com/mcpmessenger/glazyr-chrome-extension",
+  "privacy_policy": "https://github.com/mcpmessenger/glazyr-chrome-extension/blob/main/PRIVACY.md",
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
@@ -37,6 +39,7 @@
         "content.js",
         "drag_drop_content.js",
         "region_select_content.js",
+        "fullpage_capture_content.js",
         "widget_content.js",
         "launcher_content.js"
       ]
@@ -49,6 +52,8 @@
         "popup.js",
         "popup_actions.js",
         "logo.png",
+        "splash-desktop.mp4",
+        "splash-mobile.mp4",
         "icons/*"
       ],
       "matches": ["<all_urls>"]

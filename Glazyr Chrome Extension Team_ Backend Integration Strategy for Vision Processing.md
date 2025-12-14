@@ -1,44 +1,79 @@
-# Glazyr Chrome Extension Team: Backend Integration Strategy for Vision Processing
+# Glazyr Chrome Extension Team: Backend Integration Strategy (Vision + MCP Runtime)
 
 **Project Manager:** Manus AI
 **Date:** December 13, 2025
-**Goal:** Ensure the Chrome Extension efficiently captures visual context and communicates with the new Google Vision-powered Glazyr backend for a functional, vision-first AI assistant.
+**Goal:** Ensure the Chrome Extension efficiently captures visual context and communicates with:
+
+- the **Vision runtime** (OCR/vision analysis), and
+- the **MCP runtime** (agent orchestration + monitoring)
+
+…while keeping the browser UI separated from raw data exposure.
 
 ---
 
-## 1. Extension's Role in Vision Processing
+## 1. Extension’s role (separation of concerns)
 
-The core responsibility of the Chrome Extension remains the same: **context capture and secure transmission**. The actual Google Vision API calls will be handled by the Glazyr Next.js backend (FE Team's responsibility).
+The core responsibility of the Chrome Extension remains the same: **context capture and local safety enforcement**.
+
+- **Vision/OCR**: performed by the Vision runtime (service endpoint). The extension may send images to this service for OCR/vision analysis.
+- **Agent orchestration (MCP)**: performed by the MCP runtime (`glazyr-control`). The extension sends **derived text context** (page excerpt, OCR/caption/labels text) rather than raw screenshots by default.
 
 The extension must ensure that the captured visual data is:
 1.  **High-fidelity:** Capture the most relevant visual context (full screenshot, selected region, or dropped image).
 2.  **Efficiently Formatted:** Convert the image data into a format that is easily transmittable over HTTP and consumable by the Node.js backend.
 3.  **Securely Transmitted:** Send the data to the correct Glazyr API endpoint.
 
-## 2. Data Flow and API Contract
+## 2. Data flow and API contracts
 
-The extension's primary interaction is with the Glazyr web application's task API. Based on the analysis of the FE repository, the endpoint is likely `/api/tasks`.
+The extension interacts with two backends:
 
-### 2.1. Required Data Format
+### 2.1 Vision runtime (OCR/vision)
 
-The extension must package the user's query and the visual context into a single JSON payload for the backend.
+The Vision runtime receives screenshot data for OCR/vision analysis (PNG/JPEG base64 data URLs or equivalent) and returns derived text (OCR/caption/labels/objects).
 
-| Field | Type | Description | Source |
-| :--- | :--- | :--- | :--- |
-| `query` | `string` | The user's natural language question (e.g., "whats on this page?"). | User Input |
-| `screenshot_data` | `string` | The captured image data, **MUST be a Base64 encoded string** of the image (e.g., JPEG or PNG). | Content/Background Script |
-| `url` | `string` | The URL of the page where the capture occurred. | `chrome.tabs` API |
-| `capture_type` | `string` | The method of capture (e.g., `"full_page"`, `"region_select"`, `"drag_drop"`). | Extension Logic |
+### 2.2 MCP runtime (agent orchestration + monitoring)
 
-### 2.2. API Endpoint
+The MCP runtime uses MCP endpoints:
 
-The extension should continue to use the established API endpoint for task execution.
+- `GET /mcp/manifest`
+- `POST /mcp/invoke`
 
-| Detail | Value |
-| :--- | :--- |
-| **Method** | `POST` |
-| **Endpoint** | `[GLAZYR_BASE_URL]/api/tasks` |
-| **Content-Type** | `application/json` |
+Minimal invoke body:
+
+```json
+{
+  "tool": "agent_executor",
+  "inputs": {
+    "input": "<user message + derived context>",
+    "task_id": "<uuid>"
+  }
+}
+```
+
+Monitoring (recommended):
+
+- `GET /api/tasks?limit=25`
+- `GET /api/tasks/{task_id}`
+
+### 2.3. What the extension should send to MCP (default)
+
+To keep the MCP runtime “text-first” and reduce sensitive payload exposure:
+
+- **User query**
+- **URL + title**
+- **Small page excerpt** (truncated)
+- **Derived vision text** (OCR/caption/labels summary), truncated
+
+Do **not** send raw screenshots to MCP unless explicitly required by a workflow.
+
+### 2.4. Website “control plane” integration (optional)
+
+If routing through the website server (recommended for centralized config + CORS simplification), use proxy routes:
+
+- `GET /api/runtime/mcp/manifest` → `{RUNTIME}/mcp/manifest`
+- `POST /api/runtime/mcp/invoke` → `{RUNTIME}/mcp/invoke`
+- `GET /api/runtime/tasks?limit=` → `{RUNTIME}/api/tasks`
+- `GET /api/runtime/tasks/[taskId]` → `{RUNTIME}/api/tasks/{task_id}`
 
 ## 3. Action Items for Extension Team
 
@@ -46,8 +81,10 @@ The following updates are required to ensure compatibility with the new backend 
 
 | Priority | Component | Action | Rationale |
 | :--- | :--- | :--- | :--- |
-| **High** | **Image Capture Logic** (`content.js`, `background.js`) | **Standardize Base64 Encoding:** Ensure all image capture methods (full screen, region select, drag/drop) consistently encode the image data as a clean, URL-safe Base64 string before transmission. | The backend will decode this string to a `Buffer` for the Google Vision API. |
-| **Medium** | **API Bridge** (`background.js` or equivalent) | **Review Payload Structure:** Verify that the JSON payload sent to `/api/tasks` strictly adheres to the contract defined in Section 2.1. | Any deviation will break the new vision processing logic on the backend. |
-| **Low** | **Error Handling** | **Improve User Feedback:** Enhance error handling for API calls. If the backend returns a 5xx error, provide a clear, user-friendly message indicating a server-side vision processing failure. | Better user experience during initial rollout and debugging. |
+| **High** | **MCP Invoke** (`background.js`) | **Send agent calls to MCP runtime:** `POST /mcp/invoke` with `tool=agent_executor` and `inputs.task_id` (UUID). | Enables robust orchestration + resumable workflows. |
+| **High** | **Monitoring** (widget UI) | **Poll `GET /api/tasks/{task_id}`** to show status updates without exposing raw data. | Gives users visibility while keeping UI safe. |
+| **High** | **Vision capture** (`background.js`, content scripts) | **Keep screenshot handling in Vision runtime only** and pass derived text into MCP. | Separation-of-concerns + safety. |
+| **Medium** | **Auth + limits** | **Attach API key header if configured** and keep payloads within size limits. | Prevents 403/413 failures and abuse. |
+| **Low** | **UX** | **Show concise quotes/summaries** instead of verbose OCR blobs. | Better user-facing experience; full data remains for AI. |
 
-By focusing on reliable context capture and adherence to the API contract, the extension team will successfully enable the new Google Vision capabilities without needing to implement the Google SDK directly.
+By keeping Vision (images) separate from MCP (derived text + orchestration), the extension remains vision-first while staying microservice-friendly and safer-by-default.

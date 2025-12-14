@@ -4,6 +4,90 @@
   let chunks = []
   let mimeType = "audio/webm"
 
+  const stitchSessions = new Map()
+
+  async function dataUrlToBlob(dataUrl) {
+    const res = await fetch(dataUrl)
+    return await res.blob()
+  }
+
+  async function blobToDataUrl(blob) {
+    return await new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onerror = () => reject(reader.error)
+      reader.onload = () => resolve(reader.result)
+      reader.readAsDataURL(blob)
+    })
+  }
+
+  async function stitchBegin(sessionId, meta) {
+    const fullHeightCss = Number(meta?.fullHeightCss || 0)
+    const viewportWidthCss = Number(meta?.viewportWidthCss || 0)
+    const viewportHeightCss = Number(meta?.viewportHeightCss || 0)
+    if (!sessionId) throw new Error("Missing sessionId.")
+    if (!fullHeightCss || !viewportWidthCss || !viewportHeightCss) throw new Error("Invalid stitch metadata.")
+
+    stitchSessions.set(sessionId, {
+      meta: { fullHeightCss, viewportWidthCss, viewportHeightCss },
+      canvas: null,
+      ctx: null,
+      scale: 1,
+      fullHeightPx: 0,
+      widthPx: 0,
+    })
+  }
+
+  async function stitchAppend(sessionId, dataUrl, scrollYCss) {
+    const s = stitchSessions.get(sessionId)
+    if (!s) throw new Error("Unknown stitch session.")
+    if (!dataUrl) throw new Error("Missing dataUrl.")
+
+    const blob = await dataUrlToBlob(dataUrl)
+    const bitmap = await createImageBitmap(blob)
+    try {
+      if (!s.canvas) {
+        // Derive scale from bitmap width vs viewport CSS width.
+        s.scale = (bitmap.width || 1) / (s.meta.viewportWidthCss || 1)
+        s.fullHeightPx = Math.max(1, Math.round((s.meta.fullHeightCss || 1) * s.scale))
+        s.widthPx = Math.max(1, bitmap.width || 1)
+
+        s.canvas = new OffscreenCanvas(s.widthPx, s.fullHeightPx)
+        s.ctx = s.canvas.getContext("2d")
+        if (!s.ctx) throw new Error("No 2D context available for stitching.")
+
+        // Fill background white to avoid black transparency in JPEG exports.
+        s.ctx.fillStyle = "#ffffff"
+        s.ctx.fillRect(0, 0, s.widthPx, s.fullHeightPx)
+      }
+
+      const yPx = Math.max(0, Math.round(Number(scrollYCss || 0) * (s.scale || 1)))
+      s.ctx.drawImage(bitmap, 0, yPx)
+    } finally {
+      try {
+        bitmap.close?.()
+      } catch {}
+    }
+  }
+
+  async function stitchFinish(sessionId, output) {
+    const s = stitchSessions.get(sessionId)
+    if (!s) throw new Error("Unknown stitch session.")
+    if (!s.canvas) throw new Error("No frames captured for stitching.")
+
+    const type = String(output?.type || "image/jpeg")
+    const quality = typeof output?.quality === "number" ? output.quality : 0.92
+    const blob = await s.canvas.convertToBlob({ type, quality })
+    const dataUrl = await blobToDataUrl(blob)
+
+    stitchSessions.delete(sessionId)
+    return { dataUrl, type, width: s.widthPx, height: s.fullHeightPx }
+  }
+
+  async function stitchAbort(sessionId) {
+    if (!sessionId) return
+    stitchSessions.delete(sessionId)
+  }
+
   function pickMimeType() {
     if (typeof MediaRecorder === "undefined") return "audio/webm"
     if (MediaRecorder.isTypeSupported("audio/webm;codecs=opus")) return "audio/webm;codecs=opus"
@@ -80,6 +164,34 @@
           sendResponse?.({ ok: true })
         })
         .catch((e) => sendResponse?.({ ok: false, error: String(e?.message || e) }))
+      return true
+    }
+
+    if (msg?.type === "OFFSCREEN_STITCH_BEGIN") {
+      stitchBegin(String(msg.sessionId || ""), msg.meta)
+        .then(() => sendResponse?.({ ok: true }))
+        .catch((e) => sendResponse?.({ ok: false, error: String(e?.message || e) }))
+      return true
+    }
+
+    if (msg?.type === "OFFSCREEN_STITCH_APPEND") {
+      stitchAppend(String(msg.sessionId || ""), String(msg.dataUrl || ""), msg.scrollYCss)
+        .then(() => sendResponse?.({ ok: true }))
+        .catch((e) => sendResponse?.({ ok: false, error: String(e?.message || e) }))
+      return true
+    }
+
+    if (msg?.type === "OFFSCREEN_STITCH_FINISH") {
+      stitchFinish(String(msg.sessionId || ""), msg.output)
+        .then((res) => sendResponse?.({ ok: true, ...res }))
+        .catch((e) => sendResponse?.({ ok: false, error: String(e?.message || e) }))
+      return true
+    }
+
+    if (msg?.type === "OFFSCREEN_STITCH_ABORT") {
+      stitchAbort(String(msg.sessionId || ""))
+        .then(() => sendResponse?.({ ok: true }))
+        .catch(() => sendResponse?.({ ok: true }))
       return true
     }
   })

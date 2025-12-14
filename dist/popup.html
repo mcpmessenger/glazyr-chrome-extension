@@ -34,12 +34,46 @@
         font-size: 13px;
         font-weight: 600;
         letter-spacing: 0.2px;
+        position: relative;
       }
 
-      #glazyr-header img {
+      #glazyr-header img,
+      #glazyr-header video {
         width: 32px;
         height: 32px;
         border-radius: 10px;
+        object-fit: cover;
+        flex-shrink: 0;
+      }
+
+      #glazyr-header video {
+        display: none;
+      }
+      
+      /* Position videos to overlay the image */
+      #glazyr-header video.flashing {
+        position: absolute;
+        left: 0;
+        top: 50%;
+        transform: translateY(-50%);
+      }
+
+      /* When flashing, show the appropriate video based on screen size */
+      #glazyr-header video.flashing.mobile-logo {
+        display: block;
+      }
+
+      @media (min-width: 600px) {
+        #glazyr-header video.flashing.mobile-logo {
+          display: none;
+        }
+        #glazyr-header video.flashing.desktop-logo {
+          display: block;
+        }
+      }
+
+      #glazyr-header img.flashing {
+        display: none;
       }
 
       #glazyr-header-actions {
@@ -58,6 +92,19 @@
         cursor: pointer;
       }
       #glazyr-framed-shot:hover {
+        background: rgba(255, 255, 255, 0.1);
+      }
+
+      #glazyr-fullpage-shot {
+        height: 34px;
+        padding: 0 10px;
+        border-radius: 10px;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        background: rgba(255, 255, 255, 0.06);
+        color: #e8f1ff;
+        cursor: pointer;
+      }
+      #glazyr-fullpage-shot:hover {
         background: rgba(255, 255, 255, 0.1);
       }
 
@@ -138,9 +185,12 @@
     <div id="glazyr-header">
       <div id="glazyr-header-left">
         <img src="logo.png" alt="Glazyr logo" />
+        <video class="desktop-logo" src="splash-desktop.mp4" muted loop playsinline></video>
+        <video class="mobile-logo" src="splash-mobile.mp4" muted loop playsinline></video>
       </div>
       <div id="glazyr-header-actions">
         <button id="glazyr-framed-shot" type="button" title="Viewport-only framed screenshot">Framed shot</button>
+        <button id="glazyr-fullpage-shot" type="button" title="Full page screenshot (scroll + stitch)">Full page</button>
         <button id="glazyr-close-widget" type="button" title="Close">×</button>
       </div>
     </div>

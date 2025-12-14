@@ -7,10 +7,17 @@
   // --- Runtime backend (Lambda Function URL) integration ---
   const RUNTIME_BASE_URL_STORAGE = "glazyrRuntimeBaseUrl"
   const RUNTIME_API_KEY_STORAGE = "glazyrRuntimeApiKey"
+  // MCP runtime (glazyr-control) integration (separate from vision runtime)
+  const MCP_RUNTIME_BASE_URL_STORAGE = "glazyrMcpRuntimeBaseUrl"
+  const MCP_RUNTIME_API_KEY_STORAGE = "glazyrMcpRuntimeApiKey"
+  // Legacy orchestrator polling (deprecated; keep opt-in to avoid spam on MCP-only runtimes)
+  const LEGACY_ORCHESTRATOR_ENABLED_STORAGE = "glazyrLegacyOrchestratorEnabled"
   const DEVICE_ID_STORAGE = "glazyrDeviceId"
 
   // Default to the provisioned runtime URL (can be overridden via chrome.storage.local).
   const DEFAULT_RUNTIME_BASE_URL = "https://lxunoqp6dwzwfllsnnxxwsqqaq0vqnhp.lambda-url.us-east-1.on.aws"
+  // Default LangChain agents MCP runtime URL (hardcoded - can be overridden via chrome.storage.local).
+  const DEFAULT_MCP_RUNTIME_BASE_URL = "https://langchain-agent-mcp-server-554655392699.us-central1.run.app"
 
   /** @type {number|null} */
   let lastActiveTabId = null
@@ -34,8 +41,32 @@
   async function getRuntimeConfig() {
     const deviceId = await ensureDeviceId()
     const res = await storageGet([RUNTIME_BASE_URL_STORAGE, RUNTIME_API_KEY_STORAGE])
-    const baseUrl = String(res?.[RUNTIME_BASE_URL_STORAGE] || DEFAULT_RUNTIME_BASE_URL).replace(/\/+$/, "")
+    let baseUrl = String(res?.[RUNTIME_BASE_URL_STORAGE] || DEFAULT_RUNTIME_BASE_URL).replace(/\/+$/, "")
+    // Normalize common misconfiguration: users sometimes paste a base URL that already ends with `/runtime`.
+    // Our runtimeFetch() appends `/runtime/...` paths, so strip it to avoid 404s like `/runtime/runtime/...`.
+    if (baseUrl.endsWith("/runtime")) baseUrl = baseUrl.slice(0, -"/runtime".length)
     const apiKey = String(res?.[RUNTIME_API_KEY_STORAGE] || "")
+    return { baseUrl, apiKey, deviceId }
+  }
+
+  async function getMcpRuntimeConfig() {
+    const deviceId = await ensureDeviceId()
+    const res = await storageGet([
+      MCP_RUNTIME_BASE_URL_STORAGE,
+      MCP_RUNTIME_API_KEY_STORAGE,
+      // fallback to legacy keys for easier setup
+      RUNTIME_BASE_URL_STORAGE,
+      RUNTIME_API_KEY_STORAGE,
+    ])
+
+    let baseUrl = String(
+      res?.[MCP_RUNTIME_BASE_URL_STORAGE] || res?.[RUNTIME_BASE_URL_STORAGE] || DEFAULT_MCP_RUNTIME_BASE_URL || ""
+    ).replace(/\/+$/, "")
+
+    // Normalize common misconfiguration: strip "/mcp" if pasted.
+    if (baseUrl.endsWith("/mcp")) baseUrl = baseUrl.slice(0, -"/mcp".length)
+
+    const apiKey = String(res?.[MCP_RUNTIME_API_KEY_STORAGE] || res?.[RUNTIME_API_KEY_STORAGE] || "")
     return { baseUrl, apiKey, deviceId }
   }
 
@@ -67,6 +98,132 @@
     }
 
     return { status: res.status, data }
+  }
+
+  async function mcpFetch(path, opts) {
+    const { baseUrl, apiKey } = await getMcpRuntimeConfig()
+    if (!baseUrl) {
+      throw new Error("LangChain agents MCP not configured. Set `/runtime url <your-mcp-url>`")
+    }
+    const url = `${baseUrl}${path}`
+    const headers = { "content-type": "application/json" }
+    if (apiKey) {
+      // Support either x-glazyr-api-key or Authorization: Bearer <key>
+      if (String(apiKey).toLowerCase().startsWith("bearer ")) headers["authorization"] = apiKey
+      else headers["x-glazyr-api-key"] = apiKey
+    }
+
+    const res = await fetch(url, {
+      method: opts?.method || "GET",
+      headers,
+      body: opts?.body !== undefined ? JSON.stringify(opts.body) : undefined,
+    })
+
+    if (res.status === 204) return { status: 204, data: null }
+
+    const text = await res.text().catch(() => "")
+    let data = null
+    try {
+      data = text ? JSON.parse(text) : null
+    } catch {
+      data = text
+    }
+
+    if (!res.ok) {
+      // Include more details from the error response
+      let msg = typeof data?.error === "string" ? data.error : `Runtime request failed (${res.status})`
+      if (data?.message) msg = String(data.message)
+      if (data?.detail) msg = String(data.detail)
+      // Include full error data for debugging
+      const err = new Error(msg)
+      err.status = res.status
+      err.data = data
+      err.fullResponse = text
+      throw err
+    }
+
+    return { status: res.status, data }
+  }
+
+  function extractMcpResponseText(data) {
+    if (data == null) return ""
+    if (typeof data === "string") return data
+
+    // LangChain agents MCP format: { content: [{ type: "text", text: "..." }] }
+    if (Array.isArray(data?.content)) {
+      const textParts = []
+      for (const item of data.content) {
+        if (item?.type === "text" && typeof item.text === "string") {
+          textParts.push(item.text)
+        } else if (typeof item === "string") {
+          textParts.push(item)
+        }
+      }
+      if (textParts.length > 0) return textParts.join("\n\n")
+    }
+
+    // Common shapes: { output: "..." }, { result: { output: "..." } }, { message: "..." }
+    const candidates = [
+      data?.output,
+      data?.text,
+      data?.message,
+      data?.result?.output,
+      data?.result?.text,
+      data?.result?.message,
+    ]
+    for (const c of candidates) {
+      if (typeof c === "string" && c.trim()) return c
+    }
+
+    try {
+      const s = JSON.stringify(data, null, 2)
+      return s
+    } catch {
+      return String(data)
+    }
+  }
+
+  async function mcpGetManifest() {
+    return await mcpFetch("/mcp/manifest", { method: "GET" })
+  }
+
+  async function mcpInvokeAgentExecutor(input, taskId, toolName) {
+    // Default to "agent_executor" (LangChain agents MCP standard tool name)
+    // But allow override for other MCP servers
+    const tool = String(toolName || "agent_executor")
+    
+    // LangChain agents MCP expects "arguments" with "query" field (not "input")
+    return await mcpFetch("/mcp/invoke", {
+      method: "POST",
+      body: {
+        tool: tool,
+        arguments: {
+          query: String(input || ""),
+        },
+      },
+    })
+  }
+
+  async function mcpGetTask(taskId) {
+    const id = encodeURIComponent(String(taskId || ""))
+    return await mcpFetch(`/api/tasks/${id}`, { method: "GET" })
+  }
+
+  async function runtimeFetchFirstOk(paths, opts) {
+    const tried = []
+    let lastErr = null
+    for (const p of paths) {
+      try {
+        tried.push(String(p))
+        const res = await runtimeFetch(String(p), opts)
+        return { ...res, _triedPaths: tried }
+      } catch (e) {
+        lastErr = e
+      }
+    }
+    const err = new Error(String(lastErr?.message || lastErr || "All runtime endpoints failed."))
+    err.triedPaths = tried
+    throw err
   }
 
   async function startRuntimeTask(intent, ctx) {
@@ -122,10 +279,86 @@
     )
   }
 
-  // Poll the runtime while the extension is active.
+  // Legacy orchestrator polling (deprecated). Keep opt-in so MCP-only runtimes don't get spammed.
+  async function isLegacyOrchestratorEnabled() {
+    const res = await storageGet([LEGACY_ORCHESTRATOR_ENABLED_STORAGE])
+    return !!res?.[LEGACY_ORCHESTRATOR_ENABLED_STORAGE]
+  }
+
   setInterval(() => {
-    pollRuntimeOnce().catch(() => {})
+    isLegacyOrchestratorEnabled()
+      .then((enabled) => {
+        if (!enabled) return
+        return pollRuntimeOnce().catch(() => {})
+      })
+      .catch(() => {})
   }, 1500)
+
+  // MCP task polling (for widget status)
+  let activeMcpTaskId = ""
+  let mcpTaskPollTimer = null
+
+  function stopMcpTaskPolling() {
+    if (mcpTaskPollTimer) clearInterval(mcpTaskPollTimer)
+    mcpTaskPollTimer = null
+    activeMcpTaskId = ""
+  }
+
+  function looksTerminalStatus(status) {
+    const s = String(status || "").toLowerCase()
+    return (
+      s === "completed" ||
+      s === "complete" ||
+      s === "done" ||
+      s === "failed" ||
+      s === "error" ||
+      s === "cancelled" ||
+      s === "canceled"
+    )
+  }
+
+  function startMcpTaskPolling(taskId) {
+    const id = String(taskId || "").trim()
+    if (!id) return
+    activeMcpTaskId = id
+    if (mcpTaskPollTimer) clearInterval(mcpTaskPollTimer)
+
+      mcpTaskPollTimer = setInterval(() => {
+        if (!activeMcpTaskId) return
+        mcpGetTask(activeMcpTaskId)
+          .then((res) => {
+            const d = res?.data || {}
+            const status = d?.status || d?.state || d?.phase || ""
+            const summary =
+              d?.summary || d?.title || d?.preview || d?.result?.summary || d?.result?.output || d?.output || ""
+
+            safeRuntimeSendMessage({
+              type: "RUNTIME_TASK_STATUS",
+              taskId: activeMcpTaskId,
+              status: String(status || ""),
+              summary: typeof summary === "string" ? summary : "",
+            })
+
+            if (looksTerminalStatus(status)) stopMcpTaskPolling()
+          })
+          .catch((err) => {
+            // If 404, the task endpoint doesn't exist (LangChain agents MCP might not support it)
+            // Just stop polling silently instead of showing errors
+            if (err?.status === 404) {
+              stopMcpTaskPolling()
+              return
+            }
+            // For other errors, show them but stop polling to avoid spam
+            safeRuntimeSendMessage({
+              type: "RUNTIME_TASK_STATUS",
+              taskId: activeMcpTaskId,
+              status: "error",
+              summary: String(err?.message || err),
+            })
+            stopMcpTaskPolling()
+          })
+    }, 1500)
+  }
 
   // --- Control-plane policy (best-effort enforcement) ---
   const CONTROL_PLANE_CONFIG_KEY = "glazyrControlPlaneConfig"
@@ -313,8 +546,22 @@
     if (has) return
     await chrome.offscreen.createDocument({
       url: "offscreen.html",
-      reasons: ["USER_MEDIA"],
-      justification: "Record microphone audio for Whisper STT from the extension UI.",
+      reasons: ["USER_MEDIA", "BLOBS"],
+      justification: "Record microphone audio (Whisper STT) and stitch full-page screenshots in an offscreen document.",
+    })
+  }
+
+  function runtimeSendMessageAsync(message) {
+    return new Promise((resolve, reject) => {
+      try {
+        chrome.runtime.sendMessage(message, (res) => {
+          const err = chrome.runtime.lastError
+          if (err) return reject(new Error(err.message))
+          resolve(res)
+        })
+      } catch (e) {
+        reject(e)
+      }
     })
   }
 
@@ -343,6 +590,15 @@
       reader.onload = () => resolve(reader.result)
       reader.readAsDataURL(blob)
     })
+  }
+
+  async function fetchImageUrlToDataUrl(imageUrl) {
+    const url = String(imageUrl || "").trim()
+    if (!url) throw new Error("Missing imageUrl.")
+    const res = await fetch(url)
+    if (!res.ok) throw new Error(`Failed to fetch image (${res.status}).`)
+    const blob = await res.blob()
+    return await blobToDataUrl(blob)
   }
 
   async function cropDataUrlToPng(dataUrl, rectCssPx, dpr) {
@@ -374,6 +630,215 @@
     const res = await runtimeFetch("/runtime/vision/ocr", { method: "POST", body: { imageDataUrl } })
     const text = String(res?.data?.text || "")
     return text
+  }
+
+  function formatLabelList(labels) {
+    const arr = Array.isArray(labels)
+      ? labels
+      : typeof labels === "string"
+        ? labels.split(",").map((s) => s.trim()).filter(Boolean)
+        : []
+    const seen = new Set()
+    const out = []
+    for (const l of arr) {
+      const name = String(typeof l === "string" ? l : l?.description || l?.name || "").trim()
+      if (!name) continue
+      const key = name.toLowerCase()
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push(name)
+      if (out.length >= 24) break
+    }
+    return out.length ? out.join(", ") : ""
+  }
+
+  function formatObjectList(objects) {
+    const arr = Array.isArray(objects)
+      ? objects
+      : typeof objects === "string"
+        ? objects.split(",").map((s) => s.trim()).filter(Boolean)
+        : []
+    const seen = new Set()
+    const out = []
+    for (const o of arr) {
+      const name = String(typeof o === "string" ? o : o?.name || o?.description || "").trim()
+      if (!name) continue
+      const key = name.toLowerCase()
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push(name)
+      if (out.length >= 24) break
+    }
+    return out.length ? out.join(", ") : ""
+  }
+
+  async function analyzeImageWithRuntimeAnalyze(imageDataUrl, features) {
+    // Runtime now supports a single endpoint that returns OCR + caption + labels + objects.
+    // Some deployments mount the same handler at different base paths; try a few common ones.
+    const res = await runtimeFetchFirstOk(
+      ["/runtime/vision/analyze", "/vision/analyze", "/api/vision/analyze", "/api/runtime/vision/analyze"],
+      {
+        method: "POST",
+        body: { imageDataUrl, features: features || undefined },
+      }
+    )
+    const data = res?.data || {}
+    if (typeof data === "string") {
+      return { text: "", caption: data, labels: [], objects: [], raw: data }
+    }
+
+    const text = typeof data.text === "string" ? data.text : ""
+    const caption = typeof data.caption === "string" ? data.caption : ""
+
+    const labels =
+      Array.isArray(data.labels) ? data.labels : Array.isArray(data.labelAnnotations) ? data.labelAnnotations : []
+    const objects =
+      Array.isArray(data.objects)
+        ? data.objects
+        : Array.isArray(data.localizedObjectAnnotations)
+          ? data.localizedObjectAnnotations
+          : []
+
+    return { text, caption, labels, objects, raw: data }
+  }
+
+  async function analyzeImageCombined(imageDataUrl) {
+    // Vision-first: always prefer single-call analyze endpoint (caption/labels/objects + OCR if available).
+    // Only include OCR text when Vision actually returns text (no "OCR: No text detected." spam).
+    // Fallback: OCR-only endpoint.
+    try {
+      const r = await analyzeImageWithRuntimeAnalyze(imageDataUrl, { ocr: true, labels: true, objects: true })
+      const labelList = formatLabelList(r.labels)
+      const objectList = formatObjectList(r.objects)
+
+      // Caption is optional; hide it if it's blank or obviously a labels string to avoid duplication.
+      let caption = String(r.caption || "").trim()
+      if (caption) {
+        const cLower = caption.toLowerCase()
+        const looksLikeLabels = cLower.startsWith("labels:") || cLower.startsWith("label:")
+        const duplicatesLabels = !!labelList && cLower.includes(labelList.toLowerCase())
+        if (looksLikeLabels || duplicatesLabels) caption = ""
+      }
+
+      const ocr = String(r.text || "").trim()
+
+      // Sentence-style formatting so it remains readable even if the chat UI collapses newlines.
+      const parts = []
+      if (caption) parts.push(`Caption: ${caption.slice(0, 1600)}`)
+      if (labelList) parts.push(`Labels: ${labelList}`)
+      if (objectList) parts.push(`Objects: ${objectList}`)
+      if (ocr) parts.push(`Text: ${ocr.slice(0, 8000)}`)
+
+      if (!parts.length) return "No visual signals detected."
+      return parts.join("\n")
+    } catch (e) {
+      // Fallback to OCR-only so capture still returns something even if analyze is down/not deployed.
+      try {
+        const ocrText = String(await analyzeImageWithRuntimeOcr(imageDataUrl))
+        const ocrTrimmed = String(ocrText || "").trim()
+        const base = ocrTrimmed ? `Text:\n${ocrTrimmed.slice(0, 8000)}` : "No text detected."
+        const tried = Array.isArray(e?.triedPaths) ? e.triedPaths.join(", ") : "/runtime/vision/analyze"
+        return (
+          base +
+          "\n\n" +
+          `Note: Vision analyze endpoint unavailable, showing OCR-only.\n` +
+          `Tried: ${tried}\n` +
+          `Details: ${String(e?.message || e).slice(0, 300)}`
+        )
+      } catch (e2) {
+        return `Vision/OCR error: ${String(e2?.message || e?.message || e2 || e)}`
+      }
+    }
+  }
+
+  function normalizeWhitespace(s) {
+    return String(s || "")
+      .replace(/\s+/g, " ")
+      .trim()
+  }
+
+  function parseVisionAnalysisText(raw) {
+    const s = String(raw || "").trim()
+    if (!s) return { raw: "", caption: "", labels: "", objects: "", text: "" }
+
+    const lines = s.split(/\r?\n/)
+    let caption = ""
+    let labels = ""
+    let objects = ""
+    let collectingText = false
+    const textLines = []
+
+    for (const line of lines) {
+      const t = String(line || "").trim()
+      const lower = t.toLowerCase()
+
+      if (lower.startsWith("caption:")) {
+        caption = t.slice("caption:".length).trim()
+        collectingText = false
+        continue
+      }
+      if (lower.startsWith("labels:")) {
+        labels = t.slice("labels:".length).trim()
+        collectingText = false
+        continue
+      }
+      if (lower.startsWith("objects:")) {
+        objects = t.slice("objects:".length).trim()
+        collectingText = false
+        continue
+      }
+      if (lower.startsWith("text:")) {
+        collectingText = true
+        const after = t.slice("text:".length).trim()
+        if (after) textLines.push(after)
+        continue
+      }
+
+      if (collectingText) {
+        // Don't slurp metadata from OCR-only fallback format.
+        if (lower.startsWith("note:") || lower.startsWith("tried:") || lower.startsWith("details:")) {
+          collectingText = false
+          continue
+        }
+        textLines.push(line)
+      }
+    }
+
+    const text = textLines.join("\n").trim()
+    return { raw: s, caption, labels, objects, text }
+  }
+
+  function formatVisionAnalysisForUser(raw) {
+    const p = parseVisionAnalysisText(raw)
+    const looksStructured = !!(p.caption || p.labels || p.objects || p.text)
+
+    if (!looksStructured) {
+      const compact = normalizeWhitespace(p.raw)
+      const q = compact.length > 240 ? compact.slice(0, 240) + "…" : compact
+      return `Quoted text: "${q}"`
+    }
+
+    const quoteSource = p.text ? normalizeWhitespace(p.text) : normalizeWhitespace(p.caption)
+    const quoted = quoteSource
+      ? quoteSource.length > 240
+        ? quoteSource.slice(0, 240) + "…"
+        : quoteSource
+      : "(none detected)"
+
+    let summary = ""
+    if (p.caption) {
+      summary = String(p.caption || "").trim()
+    } else if (p.text) {
+      const compact = normalizeWhitespace(p.text)
+      const m = compact.match(/^[\s\S]{1,600}?[.?!](\s|$)/)
+      const firstSentence = (m ? m[0] : compact).trim()
+      summary = firstSentence.length > 240 ? firstSentence.slice(0, 240) + "…" : firstSentence
+    }
+
+    summary = String(summary || "").trim()
+    if (summary.length > 900) summary = summary.slice(0, 900) + "…"
+
+    return `Quoted text: "${quoted}"\nSummary: ${summary || "(no summary)"}`
   }
 
   function requestRegionSelect(tabId) {
@@ -431,22 +896,169 @@
 
     safeRuntimeSendMessage({ type: "CAPTURE_DONE", imageDataUrl: croppedDataUrl })
 
-    // Analyze (OCR via runtime) and report back to popup and page (fallback to mock).
-    let analysisText = ""
-    try {
-      const ocrText = await analyzeImageWithRuntimeOcr(croppedDataUrl)
-      const trimmed = String(ocrText || "").trim()
-      analysisText = trimmed ? `OCR:\n${trimmed.slice(0, 8000)}` : "OCR: No text detected."
-    } catch (e) {
-      analysisText = `OCR error: ${String(e?.message || e)}`
-    }
+    // Analyze (OCR + optional vision analysis) and report back to popup and page.
+    const analysisText = await analyzeImageCombined(croppedDataUrl)
     await chrome.storage.local.set({
       lastCapture: { imageDataUrl: croppedDataUrl, analysisText, ts: Date.now() },
     })
 
     safeRuntimeSendMessage({ type: "ANALYSIS_RESULT", text: analysisText, imageDataUrl: croppedDataUrl })
-    chrome.tabs.sendMessage(tabId, { type: "AI_RESPONSE", text: analysisText }, () => {
+    chrome.tabs.sendMessage(tabId, { type: "AI_RESPONSE", text: formatVisionAnalysisForUser(analysisText) }, () => {
       void chrome.runtime.lastError
+    })
+  }
+
+  const fullPageSessions = new Map()
+
+  async function captureVisibleTabDataUrl(windowId, options) {
+    return await new Promise((resolve, reject) => {
+      chrome.tabs.captureVisibleTab(windowId, options, (dataUrl) => {
+        const err = chrome.runtime.lastError
+        if (err) return reject(new Error(err.message))
+        if (!dataUrl) return reject(new Error("No screenshot data returned."))
+        resolve(dataUrl)
+      })
+    })
+  }
+
+  async function handleFullPageInit(sender, payload) {
+    await checkPolicyOrThrow(sender, "screenshot")
+    const tabId = sender?.tab?.id
+    const windowId = sender?.tab?.windowId
+    if (!tabId || typeof windowId !== "number") throw new Error("No active tab/window for capture.")
+
+    const meta = payload?.meta || {}
+    const fullHeightCss = Number(meta.fullHeightCss || 0)
+    const viewportWidthCss = Number(meta.viewportWidthCss || 0)
+    const viewportHeightCss = Number(meta.viewportHeightCss || 0)
+    if (!fullHeightCss || !viewportWidthCss || !viewportHeightCss) throw new Error("Invalid capture metadata.")
+
+    const sessionId = `${Date.now()}-${Math.random().toString(16).slice(2)}`
+    fullPageSessions.set(sessionId, { tabId, windowId, meta: { fullHeightCss, viewportWidthCss, viewportHeightCss } })
+
+    safeRuntimeSendMessage({ type: "CAPTURE_STARTED" })
+    safeRuntimeSendMessage({ type: "CAPTURE_HINT", text: "Capturing full page… (scrolling briefly)" })
+
+    await ensureOffscreenDocument()
+    await runtimeSendMessageAsync({
+      type: "OFFSCREEN_STITCH_BEGIN",
+      sessionId,
+      meta: { fullHeightCss, viewportWidthCss, viewportHeightCss },
+    })
+
+    return { ok: true, sessionId }
+  }
+
+  async function handleFullPageGrab(sender, payload) {
+    await checkPolicyOrThrow(sender, "screenshot")
+    const tabId = sender?.tab?.id
+    const sessionId = String(payload?.sessionId || "")
+    const sess = fullPageSessions.get(sessionId)
+    if (!sessionId || !sess) throw new Error("No active full-page capture session.")
+    if (tabId && sess.tabId && tabId !== sess.tabId) throw new Error("Session/tab mismatch.")
+
+    const scrollYCss = Number(payload?.scrollYCss || 0)
+    const index = Number(payload?.index || 0)
+    const total = Number(payload?.total || 0)
+
+    if (Number.isFinite(index) && Number.isFinite(total) && total > 0) {
+      safeRuntimeSendMessage({ type: "CAPTURE_HINT", text: `Capturing full page… ${index + 1}/${total}` })
+    }
+
+    const dataUrl = await captureVisibleTabDataUrl(sess.windowId, { format: "jpeg", quality: 92 })
+
+    await runtimeSendMessageAsync({
+      type: "OFFSCREEN_STITCH_APPEND",
+      sessionId,
+      dataUrl,
+      scrollYCss,
+    })
+
+    return { ok: true }
+  }
+
+  async function handleFullPageComplete(sender, payload) {
+    await checkPolicyOrThrow(sender, "screenshot")
+    const tabId = sender?.tab?.id
+    const sessionId = String(payload?.sessionId || "")
+    const sess = fullPageSessions.get(sessionId)
+    if (!sessionId || !sess) throw new Error("No active full-page capture session.")
+    if (tabId && sess.tabId && tabId !== sess.tabId) throw new Error("Session/tab mismatch.")
+
+    const stitched = await runtimeSendMessageAsync({
+      type: "OFFSCREEN_STITCH_FINISH",
+      sessionId,
+      output: { type: "image/jpeg", quality: 0.92 },
+    })
+    const imageDataUrl = String(stitched?.dataUrl || "")
+    if (!imageDataUrl) throw new Error("Stitching returned no image.")
+
+    fullPageSessions.delete(sessionId)
+
+    safeRuntimeSendMessage({ type: "CAPTURE_DONE", imageDataUrl })
+
+    // Analyze (OCR + optional vision analysis). If the vision endpoint isn't available yet,
+    // this gracefully falls back to OCR-only.
+    const analysisText = await analyzeImageCombined(imageDataUrl)
+
+    await chrome.storage.local.set({
+      lastCapture: { imageDataUrl, analysisText, ts: Date.now() },
+    })
+
+    safeRuntimeSendMessage({ type: "ANALYSIS_RESULT", text: analysisText, imageDataUrl })
+    if (sess.tabId) {
+      chrome.tabs.sendMessage(
+        sess.tabId,
+        { type: "AI_RESPONSE", text: formatVisionAnalysisForUser(analysisText) },
+        () => void chrome.runtime.lastError
+      )
+    }
+
+    return { ok: true }
+  }
+
+  async function handleFullPageAbort(_sender, payload) {
+    const sessionId = String(payload?.sessionId || "")
+    if (sessionId) fullPageSessions.delete(sessionId)
+    try {
+      if (sessionId) await runtimeSendMessageAsync({ type: "OFFSCREEN_STITCH_ABORT", sessionId })
+    } catch {}
+    safeRuntimeSendMessage({ type: "ANALYSIS_ERROR", text: String(payload?.error || "Full page capture aborted.") })
+    return { ok: true }
+  }
+
+  // Helper to request fresh page context from content script
+  async function requestFreshPageContext(tabId) {
+    return new Promise((resolve) => {
+      // Inject a small script to capture fresh context with delay
+      if (chrome?.scripting?.executeScript) {
+        chrome.scripting.executeScript(
+          {
+            target: { tabId },
+            func: () => {
+              // Wait a bit for page to stabilize, then capture context
+              setTimeout(() => {
+                const url = window.location.href
+                const title = document.title
+                const text = document.body ? document.body.innerText.substring(0, 5000) : ""
+                chrome.runtime.sendMessage(
+                  { type: "PAGE_CONTEXT", url, title, text },
+                  () => void chrome.runtime.lastError
+                )
+              }, 1500)
+            },
+          },
+          () => {
+            // Give it time to execute
+            setTimeout(resolve, 2000)
+          }
+        )
+      } else {
+        // Fallback: just send a message
+        chrome.tabs.sendMessage(tabId, { type: "REQUEST_PAGE_CONTEXT" }, () => {
+          setTimeout(resolve, 2000)
+        })
+      }
     })
   }
 
@@ -470,12 +1082,42 @@
     // Drag-drop image analysis
     if (msg?.type === "IMAGE_FOR_ANALYSIS") {
       console.log(`Image received for analysis from ${msg.source}.`)
-      const text = `Glazyr AI Mock: Image from ${msg.source} received. It is ready for vision analysis.`
-      sendResponse({ status: "Image received for analysis" })
-      safeRuntimeSendMessage({ type: "ANALYSIS_RESULT", text })
-      if (sender?.tab?.id) {
-        chrome.tabs.sendMessage(sender.tab.id, { type: "AI_RESPONSE", text }, () => void chrome.runtime.lastError)
-      }
+      ;(async () => {
+        try {
+          await checkPolicyOrThrow(sender, "screenshot")
+          safeRuntimeSendMessage({ type: "CAPTURE_STARTED" })
+
+          const imageDataUrl = msg?.dataUrl
+            ? String(msg.dataUrl || "")
+            : msg?.imageUrl
+              ? await fetchImageUrlToDataUrl(msg.imageUrl)
+              : ""
+          if (!imageDataUrl) throw new Error("No image provided for analysis.")
+
+          safeRuntimeSendMessage({ type: "CAPTURE_DONE", imageDataUrl })
+          safeRuntimeSendMessage({ type: "CAPTURE_HINT", text: "Analyzing image…" })
+
+          const analysisText = await analyzeImageCombined(imageDataUrl)
+
+          await chrome.storage.local.set({
+            lastCapture: { imageDataUrl, analysisText, ts: Date.now() },
+          })
+
+          safeRuntimeSendMessage({ type: "ANALYSIS_RESULT", text: analysisText, imageDataUrl })
+          if (sender?.tab?.id) {
+            chrome.tabs.sendMessage(
+              sender.tab.id,
+              { type: "AI_RESPONSE", text: formatVisionAnalysisForUser(analysisText) },
+              () => void chrome.runtime.lastError
+            )
+          }
+          sendResponse({ status: "ok" })
+        } catch (err) {
+          const text = String(err?.message || err)
+          safeRuntimeSendMessage({ type: "ANALYSIS_ERROR", text })
+          sendResponse({ status: "error", error: text })
+        }
+      })()
       return true
     }
 
@@ -488,6 +1130,43 @@
           safeRuntimeSendMessage({ type: "ANALYSIS_ERROR", text: String(err?.message || err) })
           sendResponse({ status: "error", error: String(err?.message || err) })
         }
+      )
+      return true
+    }
+
+    // Full page capture (scroll in content script, capture+stitch here/offscreen)
+    if (msg?.type === "FULLPAGE_CAPTURE_INIT") {
+      handleFullPageInit(sender, msg).then(
+        (res) => sendResponse(res),
+        (err) => sendResponse({ ok: false, error: String(err?.message || err) })
+      )
+      return true
+    }
+
+    if (msg?.type === "FULLPAGE_CAPTURE_GRAB") {
+      handleFullPageGrab(sender, msg).then(
+        (res) => sendResponse(res),
+        (err) => sendResponse({ ok: false, error: String(err?.message || err) })
+      )
+      return true
+    }
+
+    if (msg?.type === "FULLPAGE_CAPTURE_COMPLETE") {
+      handleFullPageComplete(sender, msg).then(
+        (res) => sendResponse(res),
+        (err) => {
+          console.error("Full page stitch failed:", err)
+          sendResponse({ ok: false, error: String(err?.message || err) })
+          safeRuntimeSendMessage({ type: "ANALYSIS_ERROR", text: String(err?.message || err) })
+        }
+      )
+      return true
+    }
+
+    if (msg?.type === "FULLPAGE_CAPTURE_ABORT") {
+      handleFullPageAbort(sender, msg).then(
+        (res) => sendResponse(res),
+        () => sendResponse({ ok: true })
       )
       return true
     }
@@ -581,6 +1260,7 @@
     if (msg?.type === "USER_QUERY") {
       const query = String(msg.query || "")
       const q = query.toLowerCase()
+      const rawTrimmed = String(query || "").trim()
 
       function normalizeQuery(input) {
         return String(input || "")
@@ -594,6 +1274,73 @@
       const nq = normalizeQuery(query)
       const nqNoSpace = nq.replace(/\s+/g, "")
 
+      function slashHelp() {
+        return (
+          "Slash commands:\n" +
+          "- /help\n" +
+          "- /mcp <message>   (force call the LangChain agents MCP)\n" +
+          "- /mcp/manifest   (show available MCP tools)\n" +
+          "- /runtime url <baseUrl>\n" +
+          "- /runtime key <key>   (or: /runtime key Bearer <key>)\n" +
+          "- /runtime show\n"
+        )
+      }
+
+      async function invokeMcpNow(userMessage) {
+        const taskId = crypto.randomUUID()
+
+        // Request fresh page context with a delay to let the page finish loading
+        // Flash the extension icon and logo to show we're waiting
+        let ctx = contextBuffer[0] || {}
+        if (sender?.tab?.id) {
+          try {
+            chrome.action.setBadgeText({ tabId: sender.tab.id, text: "⏳" })
+            chrome.action.setBadgeBackgroundColor({ tabId: sender.tab.id, color: "#2196F3" })
+          } catch {}
+
+          // Notify popup to flash the logo
+          safeRuntimeSendMessage({ type: "PAGE_CONTEXT_LOADING" })
+
+          // Request fresh context with delay (waits for page to stabilize)
+          await requestFreshPageContext(sender.tab.id)
+
+          // Refresh context from buffer (might have updated)
+          const freshCtx = contextBuffer[0] || ctx
+          if (freshCtx) ctx = freshCtx
+
+          // Clear the badge and stop flashing
+          try {
+            chrome.action.setBadgeText({ tabId: sender.tab.id, text: "" })
+          } catch {}
+          safeRuntimeSendMessage({ type: "PAGE_CONTEXT_LOADED" })
+        }
+
+        const lastCapture = await storageGet(["lastCapture"]).then((r) => r?.lastCapture || null)
+        const derivedVision = String(lastCapture?.analysisText || "").trim()
+        const pageSnippet = String(ctx?.text || "").trim().slice(0, 1400)
+
+        const input =
+          `User: ${String(userMessage || "").trim()}\n\n` +
+          `Context:\n` +
+          (ctx?.url ? `- URL: ${String(ctx.url)}\n` : "") +
+          (ctx?.title ? `- Title: ${String(ctx.title)}\n` : "") +
+          (pageSnippet ? `- Page excerpt: ${pageSnippet}${pageSnippet.length >= 1400 ? "…" : ""}\n` : "") +
+          (derivedVision ? `\nVision/OCR (derived text only):\n${derivedVision.slice(0, 8000)}\n` : "")
+
+        // Try calling with the standard format first
+        try {
+          const res = await mcpInvokeAgentExecutor(input, taskId)
+          // Start task polling (will gracefully stop if endpoint doesn't exist)
+          startMcpTaskPolling(taskId)
+          const text = extractMcpResponseText(res?.data).trim()
+          if (text) return { text: text.slice(0, 8000), taskId }
+          return { text: `Queued in runtime.\nTask: ${taskId}`, taskId }
+        } catch (e) {
+          // Re-throw with better error details
+          throw e
+        }
+      }
+
       // Quick debug hook: ask "glazyr debug" to confirm the running background script has the latest logic.
       if (nq === "glazyr debug") {
         sendResponse({
@@ -603,6 +1350,205 @@
             "- background: ocr-in-chat + page-about matcher v2\n" +
             `- normalizedQuery: "${nq}"`,
         })
+        return true
+      }
+
+      // Lightweight runtime configuration via chat (so we don't need a settings UI yet).
+      // Examples:
+      // - "set runtime url https://..."
+      // - "set runtime key Bearer ..."
+      // - "show runtime config"
+      if (nq.startsWith("set runtime url ")) {
+        const url = String(query).slice(String("set runtime url ").length).trim().replace(/\/+$/, "")
+        chrome.storage.local.set({ [MCP_RUNTIME_BASE_URL_STORAGE]: url }, () => {
+          sendResponse({ type: "AI_RESPONSE", text: url ? `Runtime URL set.` : "Runtime URL cleared." })
+        })
+        return true
+      }
+
+      if (nq.startsWith("set runtime key ")) {
+        const key = String(query).slice(String("set runtime key ").length).trim()
+        chrome.storage.local.set({ [MCP_RUNTIME_API_KEY_STORAGE]: key }, () => {
+          sendResponse({ type: "AI_RESPONSE", text: key ? `Runtime key set.` : "Runtime key cleared." })
+        })
+        return true
+      }
+
+      if (nq === "show runtime config") {
+        getMcpRuntimeConfig()
+          .then((cfg) => {
+            sendResponse({
+              type: "AI_RESPONSE",
+              text:
+                `Runtime URL: ${String(cfg?.baseUrl || "(not set)")}\n` +
+                `Auth: ${cfg?.apiKey ? "(set)" : "(not set)"}`,
+            })
+          })
+          .catch((e) => sendResponse({ type: "AI_RESPONSE", text: String(e?.message || e) }))
+        return true
+      }
+
+      // Slash commands (power user / debug)
+      if (rawTrimmed.startsWith("/")) {
+        // Handle /mcp/manifest specially (it has a slash, not a space)
+        if (rawTrimmed.toLowerCase().startsWith("/mcp/manifest")) {
+          mcpGetManifest()
+            .then((res) => {
+              const manifest = res?.data || {}
+              const tools = manifest?.tools || []
+              const toolList =
+                tools.length > 0
+                  ? tools.map((t) => `- ${String(t.name || "")}: ${String(t.description || "No description")}`).join("\n")
+                  : "No tools found in manifest."
+              sendResponse({
+                type: "AI_RESPONSE",
+                text: `LangChain agents MCP Manifest:\n\nAvailable tools (${tools.length}):\n${toolList}`,
+              })
+            })
+            .catch((e) => {
+              const errMsg = String(e?.message || e)
+              sendResponse({ type: "AI_RESPONSE", text: `Failed to fetch manifest: ${errMsg}` })
+            })
+          return true
+        }
+
+        const parts = rawTrimmed.split(/\s+/)
+        const cmd = String(parts[0] || "").toLowerCase()
+        const rest = rawTrimmed.slice(parts[0].length).trim()
+
+        if (cmd === "/help") {
+          sendResponse({ type: "AI_RESPONSE", text: slashHelp() })
+          return true
+        }
+
+        // Handle /mcp commands (both /mcp/manifest and /mcp <message>)
+        if (cmd === "/mcp" || cmd.startsWith("/mcp/")) {
+          // Check if it's /mcp/manifest (either "/mcp/manifest" or "/mcp manifest")
+          const isManifest =
+            cmd === "/mcp/manifest" ||
+            cmd.startsWith("/mcp/manifest") ||
+            (cmd === "/mcp" && (parts[1]?.toLowerCase() === "manifest" || rest.toLowerCase().startsWith("manifest")))
+
+          if (isManifest) {
+            mcpGetManifest()
+              .then((res) => {
+                const manifest = res?.data || {}
+                const tools = manifest?.tools || []
+                const toolList =
+                  tools.length > 0
+                    ? tools
+                        .map((t) => {
+                          const name = String(t.name || "")
+                          const desc = String(t.description || "No description")
+                          const inputSchema = t.inputSchema ? JSON.stringify(t.inputSchema, null, 2) : "No schema"
+                          return `${name}:\n  Description: ${desc}\n  Input schema: ${inputSchema}`
+                        })
+                        .join("\n\n")
+                    : "No tools found in manifest."
+                sendResponse({
+                  type: "AI_RESPONSE",
+                  text: `LangChain agents MCP Manifest:\n\nAvailable tools (${tools.length}):\n\n${toolList}`,
+                })
+              })
+              .catch((e) => {
+                const errMsg = String(e?.message || e)
+                if (errMsg.includes("MCP runtime URL not configured")) {
+                  sendResponse({
+                    type: "AI_RESPONSE",
+                    text:
+                      `MCP runtime URL not configured.\n\n` +
+                      `To use LangChain agents MCP:\n` +
+                      `1) Set runtime URL: \`/runtime url https://<your-langchain-agents-mcp-base>\`\n` +
+                      `2) (Optional) Set API key: \`/runtime key <key>\`\n` +
+                      `3) Then try: \`/mcp/manifest\``,
+                  })
+                } else {
+                  sendResponse({ type: "AI_RESPONSE", text: `Failed to fetch manifest: ${errMsg}` })
+                }
+              })
+            return true
+          }
+          // Otherwise, invoke the agent
+          const msgText = rest || "Hello"
+          invokeMcpNow(msgText).then(
+            (r) => sendResponse({ type: "AI_RESPONSE", text: r.text }),
+            (e) => {
+              const errMsg = String(e?.message || e)
+              // Include more error details for 422 (validation errors)
+              let errorText = errMsg
+              if (e?.status === 422 && e?.data) {
+                const details = typeof e.data === "object" ? JSON.stringify(e.data, null, 2) : String(e.data)
+                errorText = `Validation error (422): ${errMsg}\n\nDetails: ${details.slice(0, 500)}`
+              } else if (e?.fullResponse) {
+                errorText = `${errMsg}\n\nResponse: ${String(e.fullResponse).slice(0, 500)}`
+              }
+
+              if (errMsg.includes("MCP runtime URL not configured")) {
+                sendResponse({
+                  type: "AI_RESPONSE",
+                  text:
+                    `MCP runtime URL not configured.\n\n` +
+                    `To use LangChain agents MCP:\n` +
+                    `1) Set runtime URL: \`/runtime url https://<your-langchain-agents-mcp-base>\`\n` +
+                    `2) (Optional) Set API key: \`/runtime key <key>\`\n` +
+                    `3) Then ask your question again: \`/mcp ${msgText}\``,
+                })
+              } else {
+                sendResponse({ type: "AI_RESPONSE", text: errorText })
+              }
+            }
+          )
+          return true
+        }
+
+        if (cmd === "/assistant") {
+          const msgText = rest || "Hello"
+          invokeMcpNow(msgText).then(
+            (r) => sendResponse({ type: "AI_RESPONSE", text: r.text }),
+            (e) => sendResponse({ type: "AI_RESPONSE", text: String(e?.message || e) })
+          )
+          return true
+        }
+
+        if (cmd === "/runtime") {
+          const sub = String(parts[1] || "").toLowerCase()
+          const value = rawTrimmed.split(/\s+/).slice(2).join(" ").trim()
+
+          if (sub === "url") {
+            const url = String(value || "").trim().replace(/\/+$/, "")
+            chrome.storage.local.set({ [MCP_RUNTIME_BASE_URL_STORAGE]: url }, () => {
+              sendResponse({ type: "AI_RESPONSE", text: url ? "Runtime URL set." : "Runtime URL cleared." })
+            })
+            return true
+          }
+
+          if (sub === "key") {
+            const key = String(value || "").trim()
+            chrome.storage.local.set({ [MCP_RUNTIME_API_KEY_STORAGE]: key }, () => {
+              sendResponse({ type: "AI_RESPONSE", text: key ? "Runtime key set." : "Runtime key cleared." })
+            })
+            return true
+          }
+
+          if (sub === "show") {
+            getMcpRuntimeConfig()
+              .then((cfg) => {
+                sendResponse({
+                  type: "AI_RESPONSE",
+                  text:
+                    `Runtime URL: ${String(cfg?.baseUrl || "(not set)")}\n` +
+                    `Auth: ${cfg?.apiKey ? "(set)" : "(not set)"}`,
+                })
+              })
+              .catch((e) => sendResponse({ type: "AI_RESPONSE", text: String(e?.message || e) }))
+            return true
+          }
+
+          sendResponse({ type: "AI_RESPONSE", text: slashHelp() })
+          return true
+        }
+
+        sendResponse({ type: "AI_RESPONSE", text: `Unknown command.\n\n${slashHelp()}` })
         return true
       }
 
@@ -633,22 +1579,115 @@
             sendResponse({ type: "AI_RESPONSE", text: "No capture found yet. Click “Framed shot” first." })
             return
           }
-          analyzeImageWithRuntimeOcr(imageDataUrl).then(
-            (text) => {
-              const trimmed = String(text || "").trim()
+          // Use analyze endpoint first (Vision-backed OCR); only return text if present.
+          analyzeImageWithRuntimeAnalyze(imageDataUrl, { ocr: true, labels: false, objects: false }).then(
+            (r) => {
+              const trimmed = String(r?.text || "").trim()
               sendResponse({ type: "AI_RESPONSE", text: trimmed ? trimmed.slice(0, 8000) : "No text detected." })
             },
-            (err) => sendResponse({ type: "AI_RESPONSE", text: String(err?.message || err) })
+            async (err) => {
+              // Fallback to OCR-only endpoint.
+              try {
+                const text = await analyzeImageWithRuntimeOcr(imageDataUrl)
+                const trimmed = String(text || "").trim()
+                sendResponse({ type: "AI_RESPONSE", text: trimmed ? trimmed.slice(0, 8000) : "No text detected." })
+              } catch (e2) {
+                sendResponse({ type: "AI_RESPONSE", text: String(e2?.message || err?.message || e2 || err) })
+              }
+            }
           )
         })
         return true
       }
 
-      const ctx = contextBuffer[0]
+      let ctx = contextBuffer[0]
+      
+      // Request fresh page context with delay to let page finish loading
+      // Flash the extension icon and logo to show we're waiting
+      // Start refresh in background (non-blocking)
+      if (sender?.tab?.id) {
+        try {
+          chrome.action.setBadgeText({ tabId: sender.tab.id, text: "⏳" })
+          chrome.action.setBadgeBackgroundColor({ tabId: sender.tab.id, color: "#2196F3" })
+        } catch {}
+
+        // Notify popup to flash the logo
+        safeRuntimeSendMessage({ type: "PAGE_CONTEXT_LOADING" })
+
+        // Request fresh context with delay (non-blocking, will update contextBuffer)
+        requestFreshPageContext(sender.tab.id)
+          .then(() => {
+            // Refresh context from buffer after delay
+            const freshCtx = contextBuffer[0]
+            if (freshCtx) {
+              // Clear the badge and stop flashing
+              try {
+                chrome.action.setBadgeText({ tabId: sender.tab.id, text: "" })
+              } catch {}
+              safeRuntimeSendMessage({ type: "PAGE_CONTEXT_LOADED" })
+            }
+          })
+          .catch((err) => {
+            console.error("Error refreshing page context:", err)
+            // Clear the badge even on error
+            try {
+              chrome.action.setBadgeText({ tabId: sender.tab.id, text: "" })
+            } catch {}
+            safeRuntimeSendMessage({ type: "PAGE_CONTEXT_LOADED" })
+          })
+      }
+
       if (!ctx) {
-        // We can still be helpful without page context: use the last OCR/capture if present,
-        // and provide clear instructions for restoring context buffering.
-        chrome.storage.local.get(["lastCapture"], (res) => {
+        // If MCP is configured, try calling it anyway (it can work with minimal context).
+        // Otherwise, show helpful guidance.
+        getMcpRuntimeConfig()
+          .then(async (cfg) => {
+            if (cfg?.baseUrl) {
+              // MCP is configured - call it with whatever context we have
+              const lastCapture = await storageGet(["lastCapture"]).then((r) => r?.lastCapture || null)
+              const derivedVision = String(lastCapture?.analysisText || "").trim()
+
+              // Try to get current tab info as fallback context
+              let tabUrl = ""
+              let tabTitle = ""
+              if (sender?.tab?.id) {
+                try {
+                  const tab = await new Promise((resolve) => {
+                    chrome.tabs.get(sender.tab.id, (t) => {
+                      if (chrome.runtime.lastError) resolve(null)
+                      else resolve(t)
+                    })
+                  })
+                  if (tab) {
+                    tabUrl = String(tab.url || "")
+                    tabTitle = String(tab.title || "")
+                  }
+                } catch {}
+              }
+
+              const input =
+                `User: ${query}\n\n` +
+                `Context:\n` +
+                (tabUrl ? `- URL: ${tabUrl}\n` : "") +
+                (tabTitle ? `- Title: ${tabTitle}\n` : "") +
+                (derivedVision ? `\nVision/OCR (derived text only):\n${derivedVision.slice(0, 8000)}\n` : "")
+
+              const taskId = crypto.randomUUID()
+              const res = await mcpInvokeAgentExecutor(input, taskId)
+              startMcpTaskPolling(taskId)
+
+              const text = extractMcpResponseText(res?.data).trim()
+              if (text) {
+                sendResponse({ type: "AI_RESPONSE", text: text.slice(0, 8000) })
+              } else {
+                sendResponse({
+                  type: "AI_RESPONSE",
+                  text: `Queued in runtime.\nTask: ${taskId}`,
+                })
+              }
+            } else {
+              // MCP not configured - show helpful guidance
+              chrome.storage.local.get(["lastCapture"], (res) => {
           const last = res?.lastCapture
           const analysisText = String(last?.analysisText || "").trim()
 
@@ -699,8 +1738,34 @@
             return
           }
 
-          sendResponse({ type: "AI_RESPONSE", text: guidance })
-        })
+                sendResponse({ type: "AI_RESPONSE", text: guidance })
+              })
+            }
+          })
+          .catch((e) => {
+            // If getMcpRuntimeConfig fails (e.g., storage error), fall back to old behavior
+            chrome.storage.local.get(["lastCapture"], (res) => {
+              const last = res?.lastCapture
+              const analysisText = String(last?.analysisText || "").trim()
+          const guidance =
+            "MCP runtime not configured.\n\n" +
+            "To enable natural language responses:\n" +
+            "1) Set runtime URL: `/runtime url https://<your-glazyr-control-base>`\n" +
+            "2) (Optional) Set API key: `/runtime key <key>`\n" +
+            "3) Ask your question again.\n\n" +
+            "Tip: You can still use \"Framed shot\" for OCR on any page you can capture."
+
+          if (analysisText) {
+                const raw = analysisText.replace(/^OCR:\s*/i, "").trim()
+                sendResponse({
+                  type: "AI_RESPONSE",
+                  text: `I don't have page context yet, but here's what I extracted from the last screenshot:\n\n${raw.slice(0, 1200)}\n\n${guidance}`,
+                })
+              } else {
+                sendResponse({ type: "AI_RESPONSE", text: guidance })
+              }
+            })
+          })
         return true
       }
 
@@ -742,16 +1807,10 @@
         return true
       }
 
-      if (q.includes("summary")) {
-        sendResponse({
-          type: "AI_RESPONSE",
-          text: `AI Summary: This page, titled "${ctx.title}", is about a topic that I have analyzed. The content is approximately ${ctx.text.length} characters long.`,
-        })
-        return true
-      }
+      // Removed "summary" fallback - now goes through LangChain MCP
 
-      // Common "summary" phrasing that doesn't include the word "summary".
-      if (
+      // Removed "whats this page about" fallback - now goes through LangChain MCP
+      if (false && (
         nq.includes("whats this page about") ||
         nq.includes("what is this page about") ||
         nq.includes("whats this site about") ||
@@ -765,7 +1824,7 @@
         nqNoSpace.includes("pageabout") ||
         nqNoSpace.includes("whatsthispageabout") ||
         nqNoSpace.includes("whatisthispageabout")
-      ) {
+      )) {
         const snippet = String(ctx.text || "").trim().slice(0, 280)
         sendResponse({
           type: "AI_RESPONSE",
@@ -776,6 +1835,7 @@
         })
         return true
       }
+      // Removed - now goes through LangChain MCP
 
       if (q.includes("click")) {
         const selector = "#mock-button"
@@ -797,16 +1857,85 @@
       }
 
       // Default path: send the query to the runtime orchestrator for planning/execution.
-      startRuntimeTask(query, ctx).then(
-        () => sendResponse({ type: "AI_RESPONSE", text: "Queued in runtime. Waiting for next action…" }),
-        (err) => sendResponse({ type: "AI_RESPONSE", text: String(err?.message || err) })
-      )
-      return true
+      Promise.resolve()
+        .then(async () => {
+          const taskId = crypto.randomUUID()
 
-      sendResponse({
-        type: "AI_RESPONSE",
-        text: `AI Response: Thank you for your query about "${query}". (Mock)`,
-      })
+          // Request fresh page context with delay to let page finish loading
+          // Flash the extension icon and logo to show we're waiting
+          if (sender?.tab?.id) {
+            try {
+              chrome.action.setBadgeText({ tabId: sender.tab.id, text: "⏳" })
+              chrome.action.setBadgeBackgroundColor({ tabId: sender.tab.id, color: "#2196F3" })
+            } catch {}
+
+            // Notify popup to flash the logo
+            safeRuntimeSendMessage({ type: "PAGE_CONTEXT_LOADING" })
+
+            // Request fresh context with delay (waits for page to stabilize)
+            await requestFreshPageContext(sender.tab.id)
+
+            // Refresh context from buffer (might have updated)
+            const freshCtx = contextBuffer[0] || ctx
+            if (freshCtx && freshCtx !== ctx) {
+              Object.assign(ctx, freshCtx)
+            }
+
+            // Clear the badge and stop flashing
+            try {
+              chrome.action.setBadgeText({ tabId: sender.tab.id, text: "" })
+            } catch {}
+            safeRuntimeSendMessage({ type: "PAGE_CONTEXT_LOADED" })
+          }
+
+          // Include derived vision/OCR if available (but do NOT send raw screenshots).
+          const lastCapture = await storageGet(["lastCapture"]).then((r) => r?.lastCapture || null)
+          const derivedVision = String(lastCapture?.analysisText || "").trim()
+
+          const pageSnippet = String(ctx?.text || "").trim().slice(0, 1400)
+
+          const input =
+            `User: ${query}\n\n` +
+            `Context:\n` +
+            `- URL: ${String(ctx?.url || "")}\n` +
+            `- Title: ${String(ctx?.title || "")}\n` +
+            (pageSnippet ? `- Page excerpt: ${pageSnippet}${pageSnippet.length >= 1400 ? "…" : ""}\n` : "") +
+            (derivedVision ? `\nVision/OCR (derived text only):\n${derivedVision.slice(0, 8000)}\n` : "")
+
+          // Kick off task (MCP invoke)
+          const res = await mcpInvokeAgentExecutor(input, taskId)
+          startMcpTaskPolling(taskId)
+
+          // Best-effort immediate response (if runtime returns output synchronously)
+          const text = extractMcpResponseText(res?.data).trim()
+          if (text) {
+            sendResponse({ type: "AI_RESPONSE", text: text.slice(0, 8000) })
+          } else {
+            sendResponse({
+              type: "AI_RESPONSE",
+              text: `Queued in runtime.\nTask: ${taskId}`,
+            })
+          }
+        })
+        .catch((err) => {
+          const errMsg = String(err?.message || err)
+          // If MCP isn't configured, provide a helpful fallback response
+          if (errMsg.includes("MCP runtime URL not configured")) {
+            const pageInfo = ctx?.title ? `This page ("${ctx.title}")` : "This page"
+            const snippet = String(ctx?.text || "").trim().slice(0, 400)
+            const fallback =
+              `${pageInfo} appears to be a web page. ` +
+              (snippet
+                ? `Here's a snippet of what I can see:\n\n${snippet}${snippet.length >= 400 ? "…" : ""}\n\n`
+                : "") +
+              `For more advanced AI responses, configure the MCP runtime:\n` +
+              `- \`/runtime url https://<your-glazyr-control-base>\`\n` +
+              `- (Optional) \`/runtime key <key>\``
+            sendResponse({ type: "AI_RESPONSE", text: fallback })
+          } else {
+            sendResponse({ type: "AI_RESPONSE", text: errMsg })
+          }
+        })
       return true
     }
   })
